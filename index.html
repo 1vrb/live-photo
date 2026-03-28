@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Photo Studio Pro - FFmpeg Edition</title>
+    <title>Live Photo Studio Pro - Fast Edition</title>
     <link rel="icon" href="data:,">
     
     <!-- Required Libraries for Metadata/Zip -->
@@ -157,7 +157,7 @@
     <div class="container">
         <div class="header-section">
             <h2>Live Photo Studio Pro</h2>
-            <p class="subtitle">Powered by FFmpeg.wasm Engine</p>
+            <p class="subtitle">Lightning Fast FFmpeg Engine</p>
         </div>
 
         <div class="toggle-container">
@@ -235,7 +235,7 @@
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
         let isSeeking = false, pendingSeekTime = null;
-        let ffmpeg = null; // Holds the WASM engine instance
+        let ffmpeg = null; 
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -249,11 +249,11 @@
         const thumbnailsContainer = document.getElementById('thumbnails');
 
         // ==========================================
-        // FFMPEG.WASM INITIALIZATION (Github Pages Safe)
+        // FFMPEG.WASM INITIALIZATION
         // ==========================================
         async function initFFmpeg() {
             if (ffmpeg) return ffmpeg;
-            updateLog("Loading FFmpeg.wasm Engine...", "info");
+            updateLog("Loading FFmpeg Engine...", "info");
             const ffmpegModule = await import('https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js');
             ffmpeg = await ffmpegModule.default({
                 locateFile: (path) => `https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/${path}`
@@ -565,7 +565,7 @@
         }
 
         // ==========================================
-        // MAIN FFMPEG PROCESSING PIPELINE
+        // FAST FFMPEG PROCESSING PIPELINE
         // ==========================================
         async function processVideoFFmpeg() {
             if (isPlaying) togglePlay();
@@ -579,7 +579,7 @@
 
             try {
                 // Initialize Engine
-                document.getElementById('btnText').innerText = "Loading Engine...";
+                document.getElementById('btnText').innerText = "Loading Fast Engine...";
                 await initFFmpeg();
 
                 // Load file into virtual memory
@@ -587,38 +587,40 @@
                 ffmpeg.FS.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
 
                 document.getElementById('progressFill').style.width = "40%";
-                document.getElementById('btnText').innerText = "Processing Video (This takes a moment)...";
+                document.getElementById('btnText').innerText = "Trimming Video (Lightning Fast)...";
                 
                 // Allow UI to update before synchronous WASM block
                 await new Promise(r => setTimeout(r, 100)); 
 
-                let args = ['-y', '-err_detect', 'ignore_err'];
+                const durationStr = (State.endTime - State.startTime).toFixed(3);
+                const startStr = State.startTime.toFixed(3);
+                let args = ['-y'];
                 
-                // Trimming parameters
-                args.push('-ss', State.startTime.toString(), '-t', (State.endTime - State.startTime).toString());
-
-                // Audio Generation (Solves the Android silent video parsing bug)
                 if (State.muteAudio) {
-                    // Generate an empty audio stream to force the muxer to create a silent audio track
-                    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
-                }
-                
-                args.push('-i', `input.${inputExt}`);
-
-                // Video settings: Force H.264, standard pixel format, fast encoding
-                args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p');
-
-                if (State.muteAudio) {
-                    // Map generated silent audio to output
-                    args.push('-map', '1:v:0', '-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k', '-shortest');
+                    // FAST MODE WITH MUTED AUDIO: Copy video, generate dummy audio
+                    args.push(
+                        // Input 1: Fast seek the video
+                        '-ss', startStr, '-t', durationStr, '-i', `input.${inputExt}`,
+                        // Input 2: Generate silent audio matching the exact duration
+                        '-f', 'lavfi', '-t', durationStr, '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                        // Map Video from Input 0, Audio from Input 1
+                        '-map', '0:v:0', '-map', '1:a:0',
+                        // COPY the video (instant), encode the silent audio (very fast)
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                        'output.mp4'
+                    );
                 } else {
-                    // Keep original audio but ensure it is AAC format for cross-platform compatibility
-                    args.push('-c:a', 'aac', '-b:a', '128k');
+                    // LIGHTNING SPEED MODE: Directly slice and copy existing video & audio
+                    args.push(
+                        // Fast seek parameters MUST go before the input for instant trimming
+                        '-ss', startStr, '-t', durationStr, '-i', `input.${inputExt}`,
+                        // -c copy tells FFmpeg to skip re-encoding entirely
+                        '-c', 'copy',
+                        'output.mp4'
+                    );
                 }
 
-                args.push('output.mp4');
-
-                // Execute FFmpeg
+                // Execute FFmpeg synchronously
                 runFFmpegSync(args);
 
                 document.getElementById('progressFill').style.width = "90%";

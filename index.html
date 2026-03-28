@@ -67,7 +67,7 @@
         }
         .option-item select {
             background: var(--panel-bg); color: white; border: 1px solid #48484A;
-            border-radius: 6px; padding: 4px; font-size: 12px; outline: none; cursor: pointer; max-width: 110px;
+            border-radius: 6px; padding: 4px; font-size: 12px; outline: none; cursor: pointer; max-width: 125px;
         }
         .option-item input[type="checkbox"] { accent-color: var(--accent-ios); width: 16px; height: 16px; cursor: pointer; }
 
@@ -211,9 +211,11 @@
                 <label class="option-item" style="grid-column: span 2;">
                     <span>Re-encode Quality</span>
                     <select id="qualitySelect" onchange="State.quality = this.value">
+                        <option value="veryhigh">Very High (Slowest)</option>
                         <option value="high">High (Slower)</option>
                         <option value="medium" selected>Medium</option>
-                        <option value="low">Low (Fastest)</option>
+                        <option value="low">Low (Fast)</option>
+                        <option value="verylow">Very Low (Fastest)</option>
                     </select>
                 </label>
             </div>
@@ -243,11 +245,7 @@
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
         let isSeeking = false, pendingSeekTime = null;
-
-        // Custom Inline Web Worker Variables
-        let ffmpegWorker = null;
-        let workerReadyResolve = null;
-        let workerDoneResolve = null;
+        let ffmpeg = null; 
         let encodeStartTime = 0;
         let expectedDuration = 0;
 
@@ -263,100 +261,53 @@
         const thumbnailsContainer = document.getElementById('thumbnails');
 
         // ==========================================
-        // CUSTOM INLINE WEBASSEMBLY WORKER
-        // Fixes Cross-Origin Worker Blocks on GitHub Pages
+        // FFMPEG BACKGROUND WORKER (CORS BYPASS)
         // ==========================================
-        function initFFmpegWorker() {
-            if (ffmpegWorker) return Promise.resolve();
+        async function initFFmpeg() {
+            if (ffmpeg) return ffmpeg;
             updateLog("Loading Background Engine...", "info");
-
-            return new Promise((resolve) => {
-                // We create a Blob containing the background worker logic.
-                // This completely circumvents the browser blocking cross-origin worker scripts.
-                const workerCode = `
-                    importScripts('https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js');
-                    let ffmpeg;
-                    
-                    self.onmessage = async function(e) {
-                        if (e.data.type === 'init') {
-                            ffmpeg = await createFFmpegCore({
-                                locateFile: function(path) { 
-                                    return 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/' + path; 
-                                },
-                                printErr: function(msg) { self.postMessage({ type: 'log', msg: msg }); },
-                                print: function(msg) { self.postMessage({ type: 'log', msg: msg }); }
-                            });
-                            self.postMessage({ type: 'ready' });
-                            
-                        } else if (e.data.type === 'run') {
-                            try {
-                                ffmpeg.FS.writeFile('input.' + e.data.ext, e.data.fileData);
-                                ffmpeg.callMain(e.data.args);
-                                const out = ffmpeg.FS.readFile('output.mp4');
-                                ffmpeg.FS.unlink('input.' + e.data.ext);
-                                ffmpeg.FS.unlink('output.mp4');
-                                // Transfer buffer back quickly
-                                self.postMessage({ type: 'done', data: out, success: true }, [out.buffer]);
-                            } catch(err) {
-                                self.postMessage({ type: 'done', error: err.message, success: false });
-                            }
-                        }
-                    };
-                `;
-
-                const blob = new Blob([workerCode], { type: 'application/javascript' });
-                ffmpegWorker = new Worker(URL.createObjectURL(blob));
-                
-                ffmpegWorker.onmessage = (e) => {
-                    if (e.data.type === 'ready') {
-                        if(workerReadyResolve) workerReadyResolve();
-                    } else if (e.data.type === 'log') {
-                        handleWorkerLog(e.data.msg);
-                    } else if (e.data.type === 'done') {
-                        if(workerDoneResolve) workerDoneResolve(e.data);
-                    }
-                };
-                
-                workerReadyResolve = resolve;
-                ffmpegWorker.postMessage({ type: 'init' });
-            });
-        }
-
-        function runFFmpegWorker(args, fileData, ext) {
-            return new Promise((resolve, reject) => {
-                workerDoneResolve = (result) => {
-                    if (result.success) resolve(result.data);
-                    else reject(new Error(result.error));
-                };
-                ffmpegWorker.postMessage({ type: 'run', args: args, fileData: fileData, ext: ext });
-            });
-        }
-
-        // Parse FFmpeg terminal logs to calculate ETA and Percentage
-        function handleWorkerLog(msg) {
-            if (!encodeStartTime || expectedDuration <= 0) return;
             
-            const timeMatch = msg.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d+)/);
-            if (timeMatch) {
-                const currentSec = (parseInt(timeMatch[1]) * 3600) + (parseInt(timeMatch[2]) * 60) + parseFloat(timeMatch[3]);
+            // Load the FFmpeg JS wrapper natively
+            const ffmpegWrapperModule = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+            const { FFmpeg } = ffmpegWrapperModule;
+            ffmpeg = new FFmpeg();
+
+            // Progress event updates the UI natively without freezing
+            ffmpeg.on('progress', ({ progress, time }) => {
+                if (!encodeStartTime || expectedDuration <= 0) return;
                 
+                const currentSec = time / 1000000;
                 let percent = (currentSec / expectedDuration) * 100;
-                if (percent > 100) percent = 100;
+                if (percent > 100) percent = 100; if (percent < 0) percent = 0;
 
                 const elapsedSec = (Date.now() - encodeStartTime) / 1000;
-                const rate = currentSec / elapsedSec;
+                const rate = currentSec / elapsedSec; 
                 let remainingSec = (expectedDuration - currentSec) / rate;
                 if (!isFinite(remainingSec) || remainingSec < 0) remainingSec = 0;
 
-                // Move progress bar (using 5% to 90% as the boundary for this phase)
-                document.getElementById('progressFill').style.width = `${5 + (percent * 0.85)}%`;
+                document.getElementById('progressFill').style.width = `${5 + (percent * 0.85)}%`; 
                 
-                if (percent < 100) {
+                if (percent > 0 && percent < 100) {
                     document.getElementById('btnText').innerText = `Encoding: ${Math.round(percent)}% (~${Math.ceil(remainingSec)}s left)`;
-                } else {
+                } else if (percent === 100) {
                     document.getElementById('btnText').innerText = "Finalizing File...";
                 }
-            }
+            });
+
+            // Bypass GitHub Pages security by fetching the worker script as a Blob
+            const workerResp = await fetch('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js');
+            const workerText = await workerResp.text();
+            const workerBlob = new Blob([workerText], { type: 'text/javascript' });
+            const workerURL = URL.createObjectURL(workerBlob);
+
+            // Use the UMD core for the Web Worker to prevent parsing errors
+            await ffmpeg.load({
+                coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js',
+                wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm',
+                workerURL: workerURL // Tells wrapper to use our secure local blob
+            });
+            
+            return ffmpeg;
         }
 
         // ==========================================
@@ -670,27 +621,33 @@
             updateLog("");
 
             try {
-                document.getElementById('btnText').innerText = "Loading FFmpeg Background Engine...";
-                await initFFmpegWorker();
+                document.getElementById('btnText').innerText = "Initializing Engine...";
+                await initFFmpeg();
+
+                const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
+                await ffmpeg.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
 
                 document.getElementById('btnText').innerText = "Starting Video Encode...";
                 
-                const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
                 const durationStr = (State.endTime - State.startTime).toFixed(3);
                 const startStr = State.startTime.toFixed(3);
                 expectedDuration = parseFloat(durationStr);
                 
                 let args = ['-y'];
 
-                // VERY FAST SEEK: Skip decoding the start entirely
+                // FAST SEEK: Skips decoding the start
                 args.push('-ss', startStr, '-i', `input.${inputExt}`);
 
-                // Quality Encoding Settings mapping
-                let preset = 'superfast'; let crf = '28';
-                if (State.quality === 'high') { preset = 'fast'; crf = '23'; }
-                else if (State.quality === 'low') { preset = 'ultrafast'; crf = '32'; }
+                // Quality map (Fine-tuned for H.264)
+                let preset = 'fast'; let crf = '26';
+                switch(State.quality) {
+                    case 'veryhigh': preset = 'slow'; crf = '18'; break;
+                    case 'high': preset = 'medium'; crf = '23'; break;
+                    case 'medium': preset = 'fast'; crf = '26'; break;
+                    case 'low': preset = 'superfast'; crf = '30'; break;
+                    case 'verylow': preset = 'ultrafast'; crf = '35'; break;
+                }
 
-                // RE-ENCODE LOGIC: Required for frame-accurate cuts.
                 args.push(
                     '-c:v', 'libx264',
                     '-preset', preset,
@@ -699,34 +656,37 @@
                     '-t', durationStr
                 );
                 
-                // Audio Logic
                 if (State.muteAudio) {
                     args.push('-an');
                 } else {
                     args.push('-c:a', 'aac', '-b:a', '128k');
                 }
 
-                // Final container settings
                 args.push('-movflags', '+faststart', 'output.mp4');
 
-                // Mark encode start time for ETA calculations
+                // Mark encode start time for ETA
                 encodeStartTime = Date.now();
 
-                // Call the inline background worker (Non-Freezing)
-                const fileDataArray = new Uint8Array(State.fileBuffer);
-                let finalVideoBuffer = await runFFmpegWorker(args, fileDataArray, inputExt);
+                // Asynchronous execution (No UI Freezing!)
+                await ffmpeg.exec(args);
 
                 document.getElementById('progressFill').style.width = "90%";
                 document.getElementById('btnText').innerText = "Applying Metadata...";
 
-                // Inject Apple Binary Identifiers
+                const fileData = await ffmpeg.readFile('output.mp4');
+                let finalVideoBuffer = fileData.buffer;
+                
+                try {
+                    await ffmpeg.deleteFile(`input.${inputExt}`);
+                    await ffmpeg.deleteFile('output.mp4');
+                } catch(e) {}
+
                 if (State.mode === 'ios') {
                     finalVideoBuffer = injectAppleVideoMetadata(finalVideoBuffer, State.uuid);
                 }
 
                 document.getElementById('progressFill').style.width = "95%";
 
-                // Image processing and Bundle creation
                 const imageBytes = await applyEXIFData();
                 if (State.mode === 'android') {
                     await createAndroidUniversal(finalVideoBuffer, imageBytes);

@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <!-- Viewport updated: Removed user-scalable=no to allow pinch-to-zoom -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
@@ -443,7 +442,7 @@
         }
 
         // ==========================================
-        // PRO AUDIO ENGINE: Synchronous Unlock + WebKit Fix
+        // FLAWLESS AUDIO EXPORT SYSTEM
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
@@ -460,116 +459,106 @@
             const needsReencoding = isTrimmed || State.muteAudio;
 
             let audioCtx = null;
-            let audioDest = null;
-            let dummyGain = null;
-
-            // 1. MUST SYNCHRONOUSLY UNLOCK AUDIO CONTEXT ON CLICK (Bypasses iOS strict rules)
-            if (needsReencoding && !State.muteAudio) {
-                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                if (AudioContextClass) {
-                    try {
-                        audioCtx = new AudioContextClass();
-                        audioCtx.resume(); // <--- CRITICAL FIX 1: Resume from Suspended state
-                        
-                        audioDest = audioCtx.createMediaStreamDestination();
-                        
-                        // CRITICAL FIX 2: Prevent Safari from silencing the node to "save battery"
-                        dummyGain = audioCtx.createGain();
-                        dummyGain.gain.value = 0.001; 
-                        dummyGain.connect(audioCtx.destination);
-                    } catch (e) { console.error("Audio Context Init Failed", e); }
-                }
-            }
-
-            let audioSource = null;
+            let audioSourceNode = null;
+            let audioDestNode = null;
             let processVid = null; 
 
             try {
                 let finalVideoFile;
 
                 if (!needsReencoding) {
-                    // Bypass renderer, user wants untouched original format
                     document.getElementById('btnText').innerText = "Using Original Video...";
                     document.getElementById('progressFill').style.width = "50%";
                     finalVideoFile = State.file;
                     await new Promise(r => setTimeout(r, 600)); 
                 } else {
                     document.getElementById('btnText').innerText = "Processing Audio...";
-                    let audioTrack = null;
+                    let tracks = [];
                     
-                    // 2. Decode raw audio securely using the unlocked context
-                    if (audioCtx) {
+                    // 1. MUST SYNC UNLOCK ON BUTTON CLICK
+                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                    if (AudioContextClass && !State.muteAudio) {
                         try {
-                            const arrayBuffer = await State.file.arrayBuffer();
-                            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-                            
-                            audioSource = audioCtx.createBufferSource();
-                            audioSource.buffer = audioBuffer;
-                            
-                            // Branch 1: Connect to recorder stream
-                            audioSource.connect(audioDest);
-                            // Branch 2: Connect to Dummy Gain (keeps node alive in WebKit)
-                            audioSource.connect(dummyGain);
-                            
-                            audioTrack = audioDest.stream.getAudioTracks()[0];
-                        } catch (err) {
-                            console.warn("Audio extraction failed:", err);
-                        }
+                            audioCtx = new AudioContextClass();
+                            audioCtx.resume();
+                        } catch (e) { console.warn("Audio Context init failed:", e); }
                     }
 
-                    // 3. Setup invisible video element
+                    // 2. CREATE A PHYSICAL (HIDDEN) UNMUTED VIDEO ELEMENT
+                    // We DO NOT use display:none or opacity:0. Safari silences audio on fully hidden elements.
                     processVid = document.createElement('video');
                     processVid.src = State.url;
                     processVid.playsInline = true;
-                    // CRITICAL: MUST REMAIN MUTED SO SAFARI ALLOWS IT TO AUTOPLAY. 
-                    // Since audio is handled perfectly by AudioContext above, video can safely stay muted!
-                    processVid.muted = true; 
-                    processVid.style.display = 'none'; 
+                    // CRUCIAL: Must be unmuted to allow audio to flow out of it
+                    processVid.muted = State.muteAudio; 
+                    processVid.style.position = 'fixed';
+                    processVid.style.top = '-9999px';
+                    processVid.style.left = '-9999px';
+                    processVid.style.width = '10px';
+                    processVid.style.height = '10px';
                     document.body.appendChild(processVid);
                     
-                    await new Promise(r => { 
-                        if (processVid.readyState >= 2) r(); 
-                        else processVid.addEventListener('loadeddata', r, { once: true }); 
-                    });
-                    
+                    // 3. CAPTURE THE PLAY GESTURE IMMEDIATELY TO UNLOCK AUDIO
+                    try {
+                        await processVid.play();
+                        processVid.pause();
+                    } catch(err) {
+                        console.warn("Unmuted autoplay restricted by browser:", err);
+                        // Fallback if browser is aggressively blocking
+                        processVid.muted = true;
+                    }
+
+                    // 4. ROUTE AUDIO TRACK SAFELY INTO DESTINATION
+                    if (audioCtx && !processVid.muted) {
+                        audioSourceNode = audioCtx.createMediaElementSource(processVid);
+                        audioDestNode = audioCtx.createMediaStreamDestination();
+                        
+                        // We connect to destNode (which feeds MediaRecorder), NOT audioCtx.destination.
+                        // This prevents the audio from blasting out of the user's physical speakers!
+                        audioSourceNode.connect(audioDestNode);
+                        
+                        const extractedAudioTracks = audioDestNode.stream.getAudioTracks();
+                        if (extractedAudioTracks.length > 0) {
+                            extractedAudioTracks[0].enabled = true;
+                            tracks.push(extractedAudioTracks[0]);
+                        }
+                    }
+
+                    // 5. SEEK TO THE CUT POINT
                     processVid.currentTime = State.startTime;
                     await new Promise(r => { processVid.addEventListener('seeked', r, { once: true }); });
 
-                    // Downscale 4K to 1080p if needed to protect Mobile RAM
+                    // 6. SETUP CANVAS FOR VIDEO RENDERING
                     const MAX_DIMENSION = 1920; 
                     let outW = processVid.videoWidth; let outH = processVid.videoHeight;
                     if (outW > MAX_DIMENSION || outH > MAX_DIMENSION) {
                         const ratio = Math.min(MAX_DIMENSION / outW, MAX_DIMENSION / outH);
                         outW = Math.round(outW * ratio); outH = Math.round(outH * ratio);
                     }
-                    outW -= outW % 2; outH -= outH % 2; // Prevent encoder crash on odd pixel counts
+                    outW -= outW % 2; outH -= outH % 2; 
 
                     hiddenCanvas.width = outW; hiddenCanvas.height = outH;
                     const ctx = hiddenCanvas.getContext('2d');
                     const canvasStream = hiddenCanvas.captureStream(30); 
-                    const videoTrack = canvasStream.getVideoTracks()[0];
+                    const extractedVideoTracks = canvasStream.getVideoTracks();
+                    if (extractedVideoTracks.length > 0) tracks.push(extractedVideoTracks[0]);
 
-                    const tracks = [videoTrack];
-                    if (audioTrack) tracks.push(audioTrack);
+                    // 7. BEGIN RECORDING BOTH TRACKS
                     const combinedStream = new MediaStream(tracks);
-
-                    const mimeTypes = [ 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm' ];
+                    const mimeTypes = ['video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm'];
                     const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
                     const bps = (outW * outH) > 2000000 ? 8000000 : 5000000;
 
                     const recorder = new MediaRecorder(combinedStream, { mimeType: mimeType, videoBitsPerSecond: bps });
+                    
                     const chunks = [];
-                    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+                    recorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
                     const recordingComplete = new Promise(resolve => {
                         recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType ? mimeType.split(';')[0] : 'video/mp4' }));
                     });
 
-                    // 4. Run Recorder and Engine Loop
                     recorder.start();
-                    
-                    // Fire audio EXACTLY synchronized to the trim cutpoint
-                    if (audioSource) { audioSource.start(0, State.startTime); }
-                    
                     await processVid.play(); 
 
                     const duration = State.endTime - State.startTime;
@@ -588,7 +577,7 @@
                             const current = processVid.currentTime - State.startTime;
                             const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
                             document.getElementById('progressFill').style.width = `${percent}%`;
-                            document.getElementById('btnText').innerText = `Rendering... ${percent}%`;
+                            document.getElementById('btnText').innerText = `Rendering Video... ${percent}%`;
 
                             requestAnimationFrame(drawLoop);
                         };
@@ -611,7 +600,7 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                if (audioSource) { try { audioSource.stop(); } catch(e){} }
+                if (audioSourceNode) { try { audioSourceNode.disconnect(); } catch(e){} }
                 if (audioCtx) { try { audioCtx.close(); } catch(e){} }
                 if (processVid && processVid.parentNode) document.body.removeChild(processVid);
 
@@ -718,7 +707,7 @@
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
-            // Forces extension to .MOV, telling iOS Photos this belongs to a Live Photo grouping
+            // Force .MOV for strict iOS parsing
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
             const movFile = new File([videoData], `${baseName}.MOV`, { type: "video/quicktime" });
 
@@ -745,14 +734,14 @@
                 zip.file(jpg.name, jpg); 
                 zip.file(mov.name, mov);
                 
-                // STORE compression bypasses memory spikes causing failures on Mobile
+                // STORE compression prevents out-of-memory crashing on mobile
                 const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
                 triggerDownload(content, "LivePhoto_Bundle.zip");
                 updateLog("✅ Zip saved. Airdrop to iPhone or extract into Photos.");
             } catch (err) {
                 console.error("ZIP fallback failed", err);
                 
-                // Ultimate Fallback: Safari blocks double programmatic downloads. Provide massive touch targets!
+                // Absolute fallback for iOS blocking double-downloads: Giant visual buttons
                 updateLog("Files ready! Please tap both to save:", "info");
                 const logEl = document.getElementById('logText');
                 logEl.innerHTML = "";

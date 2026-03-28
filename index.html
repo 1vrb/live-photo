@@ -134,6 +134,13 @@
         .cover-scrubber::after { content: ''; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%); width: 12px; height: 12px; background: #ffffff; border-radius: 50%; }
         .cover-scrubber:active { cursor: grabbing; background: #E5E5EA; }
         
+        /* Trim Warning Box */
+        .warning-box {
+            background: rgba(255, 214, 10, 0.1); border: 1px solid rgba(255, 214, 10, 0.2);
+            color: var(--accent-yellow); padding: 12px; border-radius: var(--radius-sm);
+            font-size: 12.5px; font-weight: 500; text-align: center; line-height: 1.4; margin-top: 4px;
+        }
+
         .process-btn { 
             position: relative; overflow: hidden; background: #FFFFFF; color: #000000; width: 100%; 
             padding: 18px; border-radius: var(--radius-md); font-size: 16px; font-weight: 700; border: none; 
@@ -194,6 +201,12 @@
                     <div class="cover-scrubber" id="handleCover"></div>
                 </div>
             </div>
+
+            <div id="trimWarning" class="warning-box hidden">
+                ⚠️ <b>Trimming Mode Active</b><br>
+                Trimming requires re-encoding to fix mobile compatibility. Processing will take approx. 1x the video length and <b>the website will freeze</b> during this time.<br>
+                <i>(Leaving the video un-trimmed is instant)</i>
+            </div>
             
             <div class="options-grid">
                 <label class="option-item">
@@ -246,8 +259,6 @@
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
         let isSeeking = false, pendingSeekTime = null;
         let ffmpeg = null; 
-        let encodeStartTime = 0;
-        let expectedDuration = 0;
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -261,53 +272,22 @@
         const thumbnailsContainer = document.getElementById('thumbnails');
 
         // ==========================================
-        // FFMPEG BACKGROUND WORKER (CORS BYPASS)
+        // SYNCHRONOUS FFMPEG INITIALIZATION
+        // Guaranteed to work on GitHub Pages
         // ==========================================
         async function initFFmpeg() {
             if (ffmpeg) return ffmpeg;
-            updateLog("Loading Background Engine...", "info");
-            
-            // Load the FFmpeg JS wrapper natively
-            const ffmpegWrapperModule = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
-            const { FFmpeg } = ffmpegWrapperModule;
-            ffmpeg = new FFmpeg();
-
-            // Progress event updates the UI natively without freezing
-            ffmpeg.on('progress', ({ progress, time }) => {
-                if (!encodeStartTime || expectedDuration <= 0) return;
-                
-                const currentSec = time / 1000000;
-                let percent = (currentSec / expectedDuration) * 100;
-                if (percent > 100) percent = 100; if (percent < 0) percent = 0;
-
-                const elapsedSec = (Date.now() - encodeStartTime) / 1000;
-                const rate = currentSec / elapsedSec; 
-                let remainingSec = (expectedDuration - currentSec) / rate;
-                if (!isFinite(remainingSec) || remainingSec < 0) remainingSec = 0;
-
-                document.getElementById('progressFill').style.width = `${5 + (percent * 0.85)}%`; 
-                
-                if (percent > 0 && percent < 100) {
-                    document.getElementById('btnText').innerText = `Encoding: ${Math.round(percent)}% (~${Math.ceil(remainingSec)}s left)`;
-                } else if (percent === 100) {
-                    document.getElementById('btnText').innerText = "Finalizing File...";
-                }
+            updateLog("Loading FFmpeg Engine...", "info");
+            const ffmpegModule = await import('https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js');
+            ffmpeg = await ffmpegModule.default({
+                locateFile: (path) => `https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/${path}`
             });
-
-            // Bypass GitHub Pages security by fetching the worker script as a Blob
-            const workerResp = await fetch('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js');
-            const workerText = await workerResp.text();
-            const workerBlob = new Blob([workerText], { type: 'text/javascript' });
-            const workerURL = URL.createObjectURL(workerBlob);
-
-            // Use the UMD core for the Web Worker to prevent parsing errors
-            await ffmpeg.load({
-                coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js',
-                wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm',
-                workerURL: workerURL // Tells wrapper to use our secure local blob
-            });
-            
             return ffmpeg;
+        }
+
+        function runFFmpegSync(cmdArgs) {
+            if (typeof ffmpeg.exec === 'function') ffmpeg.exec(...cmdArgs);
+            else if (typeof ffmpeg.callMain === 'function') ffmpeg.callMain(cmdArgs);
         }
 
         // ==========================================
@@ -502,14 +482,23 @@
             const pStart = (State.startTime / State.duration) * 100;
             const pEnd = (State.endTime / State.duration) * 100;
             const pCover = (State.coverTime / State.duration) * 100;
+            
             document.getElementById('handleCover').style.left = `${pCover}%`;
             document.getElementById('trimBox').style.left = `${pStart}%`;
             document.getElementById('trimBox').style.width = `${pEnd - pStart}%`;
             document.getElementById('dimLeft').style.width = `${pStart}%`;
             document.getElementById('dimRight').style.width = `${100 - pEnd}%`;
             document.getElementById('coverText').innerHTML = `Cover <span>${State.coverTime.toFixed(1)}s</span>`;
-            document.getElementById('trimText').innerHTML = (State.startTime > 0.1 || State.endTime < State.duration - 0.1) ? 
-                `Trim <span>${(State.endTime - State.startTime).toFixed(1)}s</span>` : `Trim <span>Full</span>`;
+            
+            const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
+            
+            if (isTrimmed) {
+                document.getElementById('trimText').innerHTML = `Trim <span>${(State.endTime - State.startTime).toFixed(1)}s</span>`;
+                document.getElementById('trimWarning').classList.remove('hidden');
+            } else {
+                document.getElementById('trimText').innerHTML = `Trim <span>Full</span>`;
+                document.getElementById('trimWarning').classList.add('hidden');
+            }
         }
 
         // ==========================================
@@ -608,7 +597,7 @@
         }
 
         // ==========================================
-        // FAST FFMPEG PROCESSING PIPELINE
+        // DYNAMIC FFMPEG PROCESSING PIPELINE
         // ==========================================
         async function processVideoFFmpeg() {
             if (isPlaying) togglePlay();
@@ -617,68 +606,76 @@
             }
             
             processBtn.disabled = true;
-            document.getElementById('progressFill').style.width = "5%";
+            document.getElementById('progressFill').style.width = "50%";
+            
+            const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
+
+            if (isTrimmed) {
+                document.getElementById('btnText').innerText = "⏳ Encoding (Site Frozen)...";
+            } else {
+                document.getElementById('btnText').innerText = "Copying Video Stream...";
+            }
             updateLog("");
 
+            // Force the browser to render the button text change before locking up
+            await new Promise(r => setTimeout(r, 100));
+
             try {
-                document.getElementById('btnText').innerText = "Initializing Engine...";
                 await initFFmpeg();
 
                 const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
-                await ffmpeg.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
+                ffmpeg.FS.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
 
-                document.getElementById('btnText').innerText = "Starting Video Encode...";
-                
-                const durationStr = (State.endTime - State.startTime).toFixed(3);
-                const startStr = State.startTime.toFixed(3);
-                expectedDuration = parseFloat(durationStr);
-                
                 let args = ['-y'];
 
-                // FAST SEEK: Skips decoding the start
-                args.push('-ss', startStr, '-i', `input.${inputExt}`);
+                if (isTrimmed) {
+                    const startStr = State.startTime.toFixed(3);
+                    const durationStr = (State.endTime - State.startTime).toFixed(3);
+                    
+                    // Fast seek before input
+                    args.push('-ss', startStr, '-i', `input.${inputExt}`);
 
-                // Quality map (Fine-tuned for H.264)
-                let preset = 'fast'; let crf = '26';
-                switch(State.quality) {
-                    case 'veryhigh': preset = 'slow'; crf = '18'; break;
-                    case 'high': preset = 'medium'; crf = '23'; break;
-                    case 'medium': preset = 'fast'; crf = '26'; break;
-                    case 'low': preset = 'superfast'; crf = '30'; break;
-                    case 'verylow': preset = 'ultrafast'; crf = '35'; break;
-                }
+                    // Quality Presets
+                    let preset = 'fast'; let crf = '26';
+                    switch(State.quality) {
+                        case 'veryhigh': preset = 'slow'; crf = '18'; break;
+                        case 'high': preset = 'medium'; crf = '23'; break;
+                        case 'medium': preset = 'fast'; crf = '26'; break;
+                        case 'low': preset = 'superfast'; crf = '30'; break;
+                        case 'verylow': preset = 'ultrafast'; crf = '35'; break;
+                    }
 
-                args.push(
-                    '-c:v', 'libx264',
-                    '-preset', preset,
-                    '-crf', crf,
-                    '-pix_fmt', 'yuv420p',
-                    '-t', durationStr
-                );
-                
-                if (State.muteAudio) {
-                    args.push('-an');
+                    // Re-encode to fix mobile keyframes
+                    args.push('-c:v', 'libx264', '-preset', preset, '-crf', crf, '-pix_fmt', 'yuv420p', '-t', durationStr);
+                    
+                    if (State.muteAudio) args.push('-an');
+                    else args.push('-c:a', 'aac', '-b:a', '128k');
+
                 } else {
-                    args.push('-c:a', 'aac', '-b:a', '128k');
+                    // Full video logic (Instant processing)
+                    args.push('-i', `input.${inputExt}`, '-c:v', 'copy');
+                    
+                    if (State.muteAudio) args.push('-an');
+                    else args.push('-c:a', 'copy');
                 }
 
+                // Final optimizations
                 args.push('-movflags', '+faststart', 'output.mp4');
 
-                // Mark encode start time for ETA
-                encodeStartTime = Date.now();
-
-                // Asynchronous execution (No UI Freezing!)
-                await ffmpeg.exec(args);
+                // Execute synchronously (Freezes site)
+                runFFmpegSync(args);
 
                 document.getElementById('progressFill').style.width = "90%";
                 document.getElementById('btnText').innerText = "Applying Metadata...";
+                
+                // Allow UI to unfreeze for a split second
+                await new Promise(r => setTimeout(r, 10));
 
-                const fileData = await ffmpeg.readFile('output.mp4');
-                let finalVideoBuffer = fileData.buffer;
+                let finalVideoBuffer = ffmpeg.FS.readFile('output.mp4').buffer;
                 
                 try {
-                    await ffmpeg.deleteFile(`input.${inputExt}`);
-                    await ffmpeg.deleteFile('output.mp4');
+                    ffmpeg.FS.unlink(`input.${inputExt}`);
+                    ffmpeg.FS.unlink('output.mp4');
                 } catch(e) {}
 
                 if (State.mode === 'ios') {
@@ -698,7 +695,7 @@
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
                 processBtn.disabled = false; document.getElementById('btnText').innerText = "Create Live Photo";
-                document.getElementById('progressFill').style.width = "0%"; encodeStartTime = 0; requestSeek(State.coverTime);
+                document.getElementById('progressFill').style.width = "0%"; requestSeek(State.coverTime);
             }
         }
 

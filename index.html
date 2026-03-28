@@ -578,11 +578,9 @@
             updateLog("");
 
             try {
-                // Initialize Engine
                 document.getElementById('btnText').innerText = "Loading Fast Engine...";
                 await initFFmpeg();
 
-                // Load file into virtual memory
                 const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
                 ffmpeg.FS.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
 
@@ -594,27 +592,29 @@
 
                 const durationStr = (State.endTime - State.startTime).toFixed(3);
                 const startStr = State.startTime.toFixed(3);
+                
                 let args = ['-y'];
+
+                // VERY FAST SEEK: Skip decoding the start entirely
+                args.push('-ss', startStr, '-i', `input.${inputExt}`);
                 
                 if (State.muteAudio) {
                     args.push(
-                        '-ss', startStr, '-i', `input.${inputExt}`,
                         '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
                         '-map', '0:v:0', '-map', '1:a:0',
-                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k'
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                        '-shortest' // Stops the null audio when the video is done
                     );
                 } else {
-                    args.push(
-                        '-ss', startStr, '-i', `input.${inputExt}`,
-                        '-c', 'copy'
-                    );
+                    // Copy exactly what is there without re-encoding
+                    args.push('-c', 'copy');
                 }
 
-                // Add strict flags to fix the "fast-forward catchup" playback bug 
+                // Apply strict fixes to repair the output container
                 args.push(
                     '-t', durationStr,
-                    '-avoid_negative_ts', 'make_zero',
-                    '-use_editlist', '0',
+                    '-avoid_negative_ts', 'make_zero', // Fixes off-sync keyframe starts
+                    '-fflags', '+genpts',              // Regenerates Presentation Timestamps
                     '-movflags', '+faststart',
                     'output.mp4'
                 );

@@ -157,7 +157,7 @@
     <div class="container">
         <div class="header-section">
             <h2>Video to Live Photo</h2>
-            <p class="subtitle">Video to Live Photo using ffmpeg</p>
+            <p class="subtitle">using ffmpeg</p>
         </div>
 
         <div class="toggle-container">
@@ -597,28 +597,27 @@
                 let args = ['-y'];
                 
                 if (State.muteAudio) {
-                    // FAST MODE WITH MUTED AUDIO: Copy video, generate dummy audio
                     args.push(
-                        // Input 1: Fast seek the video
-                        '-ss', startStr, '-t', durationStr, '-i', `input.${inputExt}`,
-                        // Input 2: Generate silent audio matching the exact duration
-                        '-f', 'lavfi', '-t', durationStr, '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-                        // Map Video from Input 0, Audio from Input 1
+                        '-ss', startStr, '-i', `input.${inputExt}`,
+                        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
                         '-map', '0:v:0', '-map', '1:a:0',
-                        // COPY the video (instant), encode the silent audio (very fast)
-                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                        'output.mp4'
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k'
                     );
                 } else {
-                    // LIGHTNING SPEED MODE: Directly slice and copy existing video & audio
                     args.push(
-                        // Fast seek parameters MUST go before the input for instant trimming
-                        '-ss', startStr, '-t', durationStr, '-i', `input.${inputExt}`,
-                        // -c copy tells FFmpeg to skip re-encoding entirely
-                        '-c', 'copy',
-                        'output.mp4'
+                        '-ss', startStr, '-i', `input.${inputExt}`,
+                        '-c', 'copy'
                     );
                 }
+
+                // Add strict flags to fix the "fast-forward catchup" playback bug 
+                args.push(
+                    '-t', durationStr,
+                    '-avoid_negative_ts', 'make_zero',
+                    '-use_editlist', '0',
+                    '-movflags', '+faststart',
+                    'output.mp4'
+                );
 
                 // Execute FFmpeg synchronously
                 runFFmpegSync(args);

@@ -67,7 +67,7 @@
         }
         .option-item select {
             background: var(--panel-bg); color: white; border: 1px solid #48484A;
-            border-radius: 6px; padding: 4px; font-size: 12px; outline: none; cursor: pointer;
+            border-radius: 6px; padding: 4px; font-size: 12px; outline: none; cursor: pointer; max-width: 140px;
         }
         .option-item input[type="checkbox"] { accent-color: var(--accent-ios); width: 16px; height: 16px; cursor: pointer; }
 
@@ -157,7 +157,7 @@
     <div class="container">
         <div class="header-section">
             <h2>Video to Live Photo</h2>
-            <p class="subtitle">using ffmpeg</p>
+            <p class="subtitle">using ffmpeg (Web Worker)</p>
         </div>
 
         <div class="toggle-container">
@@ -208,6 +208,15 @@
                         <option value="Google">Pixel 8 Pro</option>
                     </select>
                 </label>
+                <!-- NEW QUALITY SELECTOR -->
+                <label class="option-item" style="grid-column: span 2;">
+                    <span>Encoding Quality</span>
+                    <select id="videoQuality" onchange="State.quality = this.value">
+                        <option value="fast">Fast (Lower Quality)</option>
+                        <option value="balanced" selected>Balanced (Medium)</option>
+                        <option value="high">High Quality (Slower)</option>
+                    </select>
+                </label>
             </div>
         </div>
 
@@ -223,7 +232,7 @@
         const State = {
             mode: 'android', fileBuffer: null, fileType: null, url: null, originalDate: null, duration: 0,
             startTime: 0, endTime: 0, coverTime: 0, uuid: null, imageBlob: null,
-            muteAudio: false, spoofDevice: 'Apple',
+            muteAudio: false, spoofDevice: 'Apple', quality: 'balanced',
             reset() {
                 if (this.url) URL.revokeObjectURL(this.url);
                 this.fileBuffer = null; this.url = null; this.imageBlob = null;
@@ -235,7 +244,10 @@
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
         let isSeeking = false, pendingSeekTime = null;
-        let ffmpeg = null; 
+        
+        let ffmpeg = null;
+        window.fetchFile = null; 
+        window.encodeStartTime = 0;
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -249,21 +261,46 @@
         const thumbnailsContainer = document.getElementById('thumbnails');
 
         // ==========================================
-        // FFMPEG.WASM INITIALIZATION
+        // FFMPEG (WEB WORKER API) INITIALIZATION
         // ==========================================
         async function initFFmpeg() {
             if (ffmpeg) return ffmpeg;
             updateLog("Loading FFmpeg Engine...", "info");
-            const ffmpegModule = await import('https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js');
-            ffmpeg = await ffmpegModule.default({
-                locateFile: (path) => `https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/${path}`
+
+            // We dynamically import the official Wrapper which spins up a Web Worker automatically
+            const { FFmpeg } = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+            const { fetchFile } = await import('https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js');
+            window.fetchFile = fetchFile;
+            
+            ffmpeg = new FFmpeg();
+
+            // Handle Progress and ETA calculations
+            ffmpeg.on('progress', ({ progress, time }) => {
+                const totalDur = State.endTime - State.startTime;
+                
+                // time is reported in microseconds (1000000 = 1 sec)
+                let encTime = time / 1000000;
+                let percentFloat = Math.max(0, Math.min(1, encTime / totalDur));
+                let percentStr = (percentFloat * 100).toFixed(0);
+                
+                let elapsed = (Date.now() - window.encodeStartTime) / 1000;
+                let speed = encTime / elapsed;
+                let remaining = Math.max(0, (totalDur - encTime) / speed);
+
+                document.getElementById('progressFill').style.width = `${percentStr}%`;
+                
+                if (speed > 0 && encTime > 0.5) {
+                    document.getElementById('btnText').innerText = `Encoding: ${percentStr}% (ETA: ${Math.round(remaining)}s)`;
+                } else {
+                    document.getElementById('btnText').innerText = `Encoding: ${percentStr}%...`;
+                }
+            });
+
+            await ffmpeg.load({
+                coreURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js',
+                wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.wasm'
             });
             return ffmpeg;
-        }
-
-        function runFFmpegSync(cmdArgs) {
-            if (typeof ffmpeg.exec === 'function') ffmpeg.exec(...cmdArgs);
-            else if (typeof ffmpeg.callMain === 'function') ffmpeg.callMain(cmdArgs);
         }
 
         // ==========================================
@@ -473,13 +510,13 @@
         // ==========================================
         function buildAppleMakerNote(uuid) {
             const maker = new Uint8Array(75);
-            maker.set([65, 112, 112, 108, 101, 32, 105, 79, 83, 0, 0, 1], 0); // "Apple iOS\0\0\x01"
-            maker.set([77, 77, 0, 42, 0, 0, 0, 8], 12); // Endianness MM, TIFF Magic
-            maker.set([0, 1], 20); // 1 Entry
-            maker.set([0, 17, 0, 2, 0, 0, 0, 37, 0, 0, 0, 26], 22); // Tag 0x0011 (Asset ID), Type ASCII, Length 37, Offset 26
-            maker.set([0, 0, 0, 0], 34); // Next IFD
+            maker.set([65, 112, 112, 108, 101, 32, 105, 79, 83, 0, 0, 1], 0); 
+            maker.set([77, 77, 0, 42, 0, 0, 0, 8], 12); 
+            maker.set([0, 1], 20); 
+            maker.set([0, 17, 0, 2, 0, 0, 0, 37, 0, 0, 0, 26], 22); 
+            maker.set([0, 0, 0, 0], 34); 
             maker.set(new TextEncoder().encode(uuid), 38);
-            maker[74] = 0; // Null terminator
+            maker[74] = 0; 
             return maker;
         }
 
@@ -490,7 +527,7 @@
             const dataBox = new Uint8Array(16 + uuidBytes.length);
             const viewData = new DataView(dataBox.buffer);
             viewData.setUint32(0, dataBox.length); dataBox.set(new TextEncoder().encode('data'), 4);
-            viewData.setUint32(8, 1); // type UTF-8
+            viewData.setUint32(8, 1); 
             dataBox.set(uuidBytes, 16);
 
             const itemBox = new Uint8Array(8 + dataBox.length);
@@ -538,16 +575,15 @@
 
             while (offset < arr.length) {
                 const size = view.getUint32(offset);
-                if (size === 0 || offset + size > arr.length) break; // Safe parsing
+                if (size === 0 || offset + size > arr.length) break; 
                 const type = String.fromCharCode(arr[offset+4], arr[offset+5], arr[offset+6], arr[offset+7]);
                 if (type === 'ftyp') ftypStart = offset;
                 if (type === 'moov') { moovStart = offset; moovSize = size; break; }
                 offset += size;
             }
 
-            if (ftypStart !== -1) arr.set(new TextEncoder().encode('qt  '), ftypStart + 8); // Change container brand to QuickTime
+            if (ftypStart !== -1) arr.set(new TextEncoder().encode('qt  '), ftypStart + 8); 
 
-            // Insert UDTA to the END of the moov box
             if (moovStart !== -1) {
                 const udtaBox = buildQuickTimeMetaBox(uuid);
                 const before = new Uint8Array(mp4Buffer, 0, moovStart + moovSize);
@@ -561,7 +597,7 @@
 
                 return newBuffer;
             }
-            return mp4Buffer; // Fallback if moov not found
+            return mp4Buffer; 
         }
 
         // ==========================================
@@ -578,63 +614,62 @@
             updateLog("");
 
             try {
-                document.getElementById('btnText').innerText = "Loading Fast Engine...";
+                document.getElementById('btnText').innerText = "Loading FFmpeg...";
                 await initFFmpeg();
 
                 const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
-                ffmpeg.FS.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
-
-                document.getElementById('progressFill').style.width = "40%";
-                document.getElementById('btnText').innerText = "Trimming Video (Lightning Fast)...";
                 
-                // Allow UI to update before synchronous WASM block
-                await new Promise(r => setTimeout(r, 100)); 
+                // Use fetchFile to safely put the buffer into the virtual file system
+                await ffmpeg.writeFile(`input.${inputExt}`, await window.fetchFile(new Uint8Array(State.fileBuffer)));
 
+                document.getElementById('progressFill').style.width = "10%";
+                document.getElementById('btnText').innerText = "Starting Encode...";
+                
                 const durationStr = (State.endTime - State.startTime).toFixed(3);
                 const startStr = State.startTime.toFixed(3);
                 
-                let args = ['-y'];
+                let args = ['-y', '-ss', startStr, '-i', `input.${inputExt}`];
 
-                // THE FIX: -noaccurate_seek
-                // Prevents FFmpeg from creating an Edit List to "hide" the gap between the nearest 
-                // Keyframe and your exact start time. Mobile players ignore that Edit List anyway, 
-                // which is why it was flashing the old start frame!
-                args.push('-ss', startStr, '-noaccurate_seek', '-i', `input.${inputExt}`);
-                
                 if (State.muteAudio) {
-                    args.push(
-                        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-                        '-map', '0:v:0', '-map', '1:a:0',
-                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                        '-shortest'
-                    );
-                } else {
-                    // Copy exact streams without slow re-encoding
-                    args.push('-c', 'copy');
+                    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100', '-map', '0:v:0', '-map', '1:a:0');
                 }
+
+                // Match quality setting to H264 parameters
+                let preset = 'veryfast'; 
+                let crf = '23';
+                if (State.quality === 'fast') { preset = 'ultrafast'; crf = '28'; }
+                if (State.quality === 'high') { preset = 'medium'; crf = '18'; }
 
                 args.push(
                     '-t', durationStr,
-                    '-avoid_negative_ts', 'make_zero',
-                    '-fflags', '+genpts',
-                    '-muxdelay', '0', // Prevents audio/video offset from creating a frozen start frame
-                    '-movflags', '+faststart',
-                    'output.mp4'
+                    '-c:v', 'libx264',
+                    '-preset', preset,
+                    '-crf', crf,
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac',
+                    '-b:a', '128k'
                 );
 
-                // Execute FFmpeg synchronously
-                runFFmpegSync(args);
+                if (State.muteAudio) args.push('-shortest');
+                
+                args.push('-movflags', '+faststart', 'output.mp4');
+
+                // Track time for ETA calculation
+                window.encodeStartTime = Date.now();
+
+                // ASYNC EXECUTION: This will not block your browser tab!
+                await ffmpeg.exec(args);
 
                 document.getElementById('progressFill').style.width = "90%";
                 document.getElementById('btnText').innerText = "Applying Metadata...";
 
-                // Extract final buffer
-                let finalVideoBuffer = ffmpeg.FS.readFile('output.mp4').buffer;
+                const fileData = await ffmpeg.readFile('output.mp4');
+                let finalVideoBuffer = fileData.buffer;
                 
                 // Cleanup virtual filesystem
                 try {
-                    ffmpeg.FS.unlink(`input.${inputExt}`);
-                    ffmpeg.FS.unlink('output.mp4');
+                    await ffmpeg.deleteFile(`input.${inputExt}`);
+                    await ffmpeg.deleteFile('output.mp4');
                 } catch(e) {}
 
                 // Inject Apple Binary Identifiers
@@ -655,8 +690,10 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                processBtn.disabled = false; document.getElementById('btnText').innerText = "Create Live Photo";
-                document.getElementById('progressFill').style.width = "0%"; requestSeek(State.coverTime);
+                processBtn.disabled = false; 
+                document.getElementById('btnText').innerText = "Create Live Photo";
+                document.getElementById('progressFill').style.width = "0%"; 
+                requestSeek(State.coverTime);
             }
         }
 
@@ -706,7 +743,6 @@
             let insertPos = 2; 
             if (imageBytes[insertPos] === 0xFF && imageBytes[insertPos+1] === 0xE0) insertPos += 2 + ((imageBytes[insertPos+2] << 8) | imageBytes[insertPos+3]);
 
-            // Fix Google Photos Padding crash (Requires exact Even boundaries)
             let jpegLen = insertPos + app1Segment.length + (imageBytes.length - insertPos);
             let padding = (jpegLen % 2 !== 0) ? 1 : 0;
 
@@ -726,7 +762,7 @@
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
-            const movFile = new File([videoArrayBuffer], `${baseName}.MOV`, { type: "video/quicktime" }); // Must be .MOV
+            const movFile = new File([videoArrayBuffer], `${baseName}.MOV`, { type: "video/quicktime" });
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
                 try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); updateLog("✅ Live Photo Shared! Save to Photos."); return; } catch (err) { fallbackZipDownload(jpgFile, movFile); }

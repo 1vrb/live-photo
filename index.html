@@ -6,9 +6,10 @@
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,"> <!-- Prevents Favicon 404 error -->
     
-    <!-- External Libraries: Upgraded to FFmpeg v0.12.x which handles CORS via Blob URLs -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+    <!-- External Libraries: v0.12.x specifically fixes SharedArrayBuffer & CORS on GitHub Pages -->
+    <!-- Added ?v=3 to force your browser to clear the cache and load these new versions -->
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js?v=3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js?v=3"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -257,11 +258,16 @@
             el.innerText = msg; el.className = `log-text ${type}`;
         }
 
-        // --- GITHUB PAGES FIX: Upgraded to FFmpeg v0.12.x Core & toBlobURL functionality ---
+        // --- GITHUB PAGES FIX: Upgraded to FFmpeg v0.12.x Core ---
         async function preloadFFmpeg() {
             if (ffmpegInstance || isFfmpegLoading) return;
             isFfmpegLoading = true;
             try {
+                // Ensure the global objects from the new CDN link exist
+                if (!window.FFmpeg || !window.FFmpegUtil) {
+                    throw new Error("FFmpeg libraries didn't load properly. Please HARD REFRESH your browser.");
+                }
+
                 const { FFmpeg } = window.FFmpeg;
                 const { toBlobURL } = window.FFmpegUtil;
                 ffmpegInstance = new FFmpeg();
@@ -273,8 +279,8 @@
                     document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
                 });
 
-                // toBlobURL converts scripts to blob:// URLs to avoid strict CORS block by the browser Worker
-                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                // toBlobURL converts scripts to blob:// URLs to avoid strict CORS block
+                const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
                 await ffmpegInstance.load({
                     coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
                     wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
@@ -521,7 +527,7 @@
             
             try {
                 if (!ffmpegInstance) await preloadFFmpeg();
-                if (!ffmpegInstance) throw new Error("FFmpeg engine failed to load. Check your network.");
+                if (!ffmpegInstance) throw new Error("FFmpeg engine failed to load. Please HARD REFRESH your browser.");
 
                 const { fetchFile } = window.FFmpegUtil;
                 
@@ -546,7 +552,7 @@
                     args.push('output.mp4');
                 }
 
-                // Execute the FFmpeg arguments
+                // Execute the FFmpeg arguments (v0.12 format)
                 await ffmpegInstance.exec(args);
 
                 document.getElementById('btnText').innerText = "Applying Metadata...";

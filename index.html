@@ -208,7 +208,6 @@
             </div>
         </div>
 
-        <!-- Call the Pure Native Audio+Video Engine -->
         <button id="processBtn" class="process-btn hidden" onclick="processVideoNative()">
             <div class="progress-fill" id="progressFill"></div>
             <span class="btn-text" id="btnText">Create Live Photo</span>
@@ -475,8 +474,9 @@
         });
 
         // ==========================================
-        // 100% PURE NATIVE BROWSER ENGINE (WITH AUDIO FIX)
-        // Uses Web Audio API to secretly route the original audio track into the new video.
+        // SMART RECORDING & NATIVE ENGINE
+        // Re-encodes using Canvas/WebAudio ONLY if the video is trimmed or audio is muted.
+        // Otherwise, uses the raw original file directly for the best possible quality.
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
@@ -486,104 +486,120 @@
             }
             
             processBtn.disabled = true;
-            document.getElementById('btnText').innerText = "Recording Output...";
             document.getElementById('progressFill').style.width = "5%";
             
             let audioCtx = null;
             let sourceNode = null;
 
             try {
-                // 1. Create a hidden video element to process audio/video properly
-                const processVid = document.createElement('video');
-                processVid.src = State.url;
-                processVid.playsInline = true;
-                processVid.muted = false; // MUST be false to extract the audio natively
+                let finalVideoFile;
                 
-                // Wait for video to be ready
-                await new Promise(r => { processVid.onloadeddata = r; processVid.load(); });
-                
-                processVid.currentTime = State.startTime;
-                await new Promise(r => { processVid.onseeked = r; });
+                // Determine if we actually need to re-record the video 
+                // We only re-record if it's trimmed or if the user explicitly requested "Mute Audio"
+                const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
+                const needsReencoding = isTrimmed || State.muteAudio;
 
-                // 2. Setup Web Audio API to secretly extract audio without playing out loud
-                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new AudioContext();
-                await audioCtx.resume(); // Ensure context is unlocked by the click event
-
-                sourceNode = audioCtx.createMediaElementSource(processVid);
-                const audioDestination = audioCtx.createMediaStreamDestination();
-                
-                // Connect video audio strictly to the destination stream (Not the speakers!)
-                sourceNode.connect(audioDestination);
-                const audioTrack = audioDestination.stream.getAudioTracks()[0];
-
-                // 3. Setup Canvas to capture video frames visually
-                hiddenCanvas.width = processVid.videoWidth;
-                hiddenCanvas.height = processVid.videoHeight;
-                const ctx = hiddenCanvas.getContext('2d');
-                const canvasStream = hiddenCanvas.captureStream(30); // 30 FPS Capture
-                const videoTrack = canvasStream.getVideoTracks()[0];
-
-                // 4. Combine Video Track and Audio Track
-                const combinedStream = new MediaStream([videoTrack]);
-                if (!State.muteAudio && audioTrack) {
-                    combinedStream.addTrack(audioTrack);
-                }
-
-                // 5. Select Best Available Output Format
-                let mimeType = '';
-                if (MediaRecorder.isTypeSupported('video/mp4')) {
-                    mimeType = 'video/mp4'; // Ideal for iOS
-                } else if (MediaRecorder.isTypeSupported('video/webm; codecs="vp8,opus"')) {
-                    mimeType = 'video/webm; codecs="vp8,opus"'; // Chrome/Android
+                if (!needsReencoding) {
+                    // Bypass rendering completely! Pass the original file directly into the bundler
+                    document.getElementById('btnText').innerText = "Using Original Video...";
+                    document.getElementById('progressFill').style.width = "50%";
+                    finalVideoFile = State.file;
+                    await new Promise(r => setTimeout(r, 600)); // Tiny pause so the UI doesn't look like it glitched
                 } else {
-                    mimeType = 'video/webm'; 
-                }
+                    document.getElementById('btnText').innerText = "Recording Output...";
+                    
+                    // 1. Create a hidden video element to process audio/video properly
+                    const processVid = document.createElement('video');
+                    processVid.src = State.url;
+                    processVid.playsInline = true;
+                    processVid.muted = false; // MUST be false to extract the audio natively
+                    
+                    // Wait for video to be ready
+                    await new Promise(r => { processVid.onloadeddata = r; processVid.load(); });
+                    
+                    processVid.currentTime = State.startTime;
+                    await new Promise(r => { processVid.onseeked = r; });
 
-                // Initialize Recorder at a high bitrate (8 Mbps) for pristine quality
-                const recorder = new MediaRecorder(combinedStream, { 
-                    mimeType: mimeType,
-                    videoBitsPerSecond: 8000000 
-                });
-                
-                const chunks = [];
-                recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+                    // 2. Setup Web Audio API to secretly extract audio without playing out loud
+                    const AudioContext = window.AudioContext || window.webkitAudioContext;
+                    audioCtx = new AudioContext();
+                    await audioCtx.resume(); // Ensure context is unlocked by the click event
 
-                const recordingComplete = new Promise(resolve => {
-                    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType.split(';')[0] }));
-                });
+                    sourceNode = audioCtx.createMediaElementSource(processVid);
+                    const audioDestination = audioCtx.createMediaStreamDestination();
+                    
+                    // Connect video audio strictly to the destination stream (Not the speakers!)
+                    sourceNode.connect(audioDestination);
+                    const audioTrack = audioDestination.stream.getAudioTracks()[0];
 
-                // 6. Start Processing
-                recorder.start();
-                await processVid.play();
+                    // 3. Setup Canvas to capture video frames visually
+                    hiddenCanvas.width = processVid.videoWidth;
+                    hiddenCanvas.height = processVid.videoHeight;
+                    const ctx = hiddenCanvas.getContext('2d');
+                    const canvasStream = hiddenCanvas.captureStream(30); // 30 FPS Capture
+                    const videoTrack = canvasStream.getVideoTracks()[0];
 
-                const duration = State.endTime - State.startTime;
+                    // 4. Combine Video Track and Audio Track
+                    const combinedStream = new MediaStream([videoTrack]);
+                    if (!State.muteAudio && audioTrack) {
+                        combinedStream.addTrack(audioTrack);
+                    }
 
-                await new Promise(resolve => {
-                    const drawLoop = () => {
-                        // Stop condition
-                        if (processVid.currentTime >= State.endTime || processVid.ended) {
-                            processVid.pause();
-                            recorder.stop();
-                            resolve();
-                            return;
-                        }
+                    // 5. Select Best Available Output Format
+                    let mimeType = '';
+                    if (MediaRecorder.isTypeSupported('video/mp4')) {
+                        mimeType = 'video/mp4'; // Ideal for iOS
+                    } else if (MediaRecorder.isTypeSupported('video/webm; codecs="vp8,opus"')) {
+                        mimeType = 'video/webm; codecs="vp8,opus"'; // Chrome/Android
+                    } else {
+                        mimeType = 'video/webm'; 
+                    }
 
-                        // Copy frame from hidden video to canvas to be recorded
-                        ctx.drawImage(processVid, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-                        
-                        // Update Progress UI
-                        const current = processVid.currentTime - State.startTime;
-                        const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
-                        document.getElementById('progressFill').style.width = `${percent}%`;
-                        document.getElementById('btnText').innerText = `Native Encoding... ${percent}%`;
+                    // Initialize Recorder at a high bitrate (8 Mbps) for pristine quality
+                    const recorder = new MediaRecorder(combinedStream, { 
+                        mimeType: mimeType,
+                        videoBitsPerSecond: 8000000 
+                    });
+                    
+                    const chunks = [];
+                    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
 
+                    const recordingComplete = new Promise(resolve => {
+                        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType.split(';')[0] }));
+                    });
+
+                    // 6. Start Processing
+                    recorder.start();
+                    await processVid.play();
+
+                    const duration = State.endTime - State.startTime;
+
+                    await new Promise(resolve => {
+                        const drawLoop = () => {
+                            // Stop condition
+                            if (processVid.currentTime >= State.endTime || processVid.ended) {
+                                processVid.pause();
+                                recorder.stop();
+                                resolve();
+                                return;
+                            }
+
+                            // Copy frame from hidden video to canvas to be recorded
+                            ctx.drawImage(processVid, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                            
+                            // Update Progress UI
+                            const current = processVid.currentTime - State.startTime;
+                            const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
+                            document.getElementById('progressFill').style.width = `${percent}%`;
+                            document.getElementById('btnText').innerText = `Native Encoding... ${percent}%`;
+
+                            requestAnimationFrame(drawLoop);
+                        };
                         requestAnimationFrame(drawLoop);
-                    };
-                    requestAnimationFrame(drawLoop);
-                });
+                    });
 
-                const finalVideoFile = await recordingComplete;
+                    finalVideoFile = await recordingComplete;
+                }
 
                 document.getElementById('btnText').innerText = "Applying Metadata...";
                 document.getElementById('progressFill').style.width = "95%";
@@ -599,7 +615,7 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                // Cleanup Web Audio nodes memory
+                // Cleanup Web Audio nodes memory if they were used
                 if (sourceNode) sourceNode.disconnect();
                 if (audioCtx) audioCtx.close();
 
@@ -704,12 +720,12 @@
         async function createIOSBundle(videoData, imageBytes) {
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
             
-            // Generate standard Apple naming structure
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
-            // Use correct extension based on MediaRecorder output type
+            // Safely map extension for native bypass files too
             let ext = "MP4";
             if (videoData.type.includes("webm")) ext = "WEBM";
+            else if (videoData.type.includes("quicktime") || (videoData.name && videoData.name.toLowerCase().endsWith(".mov"))) ext = "MOV";
             
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
             const movFile = new File([videoData], `${baseName}.${ext}`, { type: videoData.type });

@@ -256,7 +256,9 @@
             el.innerText = msg; el.className = `log-text ${type}`;
         }
 
-        // --- GITHUB PAGES FIX: Fetching FFmpeg securely via toBlobURL ---
+        // --- GITHUB PAGES CORS FIX ---
+        // We load the Web Worker file (814.ffmpeg.js) into a local Blob URL
+        // to bypass the browser's strict Cross-Origin Worker limits.
         async function preloadFFmpeg() {
             if (ffmpegInstance || isFfmpegLoading) return;
             isFfmpegLoading = true;
@@ -265,19 +267,22 @@
                 const { toBlobURL } = window.FFmpegUtil;
                 ffmpegInstance = new FFmpeg();
 
-                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const coreURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const ffmpegURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
                 
-                // toBlobURL converts the CDN link into a local blob. 
-                // This bypasses the Cross-Origin Worker block on GitHub Pages!
                 await ffmpegInstance.load({
-                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                    coreURL: await toBlobURL(`${coreURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${coreURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                    // This is the crucial fix for the GitHub Pages SecurityError
+                    classWorkerURL: await toBlobURL(`${ffmpegURL}/814.ffmpeg.js`, 'text/javascript')
                 });
                 console.log("FFmpeg core loaded successfully.");
             } catch (err) {
-                console.warn("FFmpeg preload failed. Will retry.", err);
-                ffmpegInstance = null;
-            } finally { isFfmpegLoading = false; }
+                console.error("FFmpeg preload failed:", err);
+                ffmpegInstance = null; // Reset so processVideo can try again
+            } finally { 
+                isFfmpegLoading = false; 
+            }
         }
 
         uploadLabel.addEventListener('dragover', e => { e.preventDefault(); uploadLabel.classList.add('dragover'); });

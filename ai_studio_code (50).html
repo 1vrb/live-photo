@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Live Photo Studio Pro</title>
+    
+    <!-- External Libraries -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+    <style>
+        /* Base Reset & Professional Styling */
+        :root {
+            --bg-color: #000000; --card-bg: #1C1C1E; --panel-bg: #2C2C2E; --hover-bg: #3A3A3C;
+            --accent-ios: #0A84FF; --accent-android: #30D158; --accent-yellow: #FFD60A;
+            --text-main: #FFFFFF; --text-muted: #8E8E93; --radius-lg: 24px; --radius-md: 16px; --radius-sm: 10px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, sans-serif; 
+            background-color: var(--bg-color); color: var(--text-main); 
+            margin: 0; padding: 20px 10px; display: flex; justify-content: center; min-height: 100vh;
+        }
+        body.dragging { user-select: none; -webkit-user-select: none; }
+
+        .container { 
+            background: var(--card-bg); width: 100%; max-width: 540px; padding: 30px 24px; 
+            border-radius: var(--radius-lg); box-shadow: 0 20px 60px rgba(0,0,0,0.9), inset 0 1px 1px rgba(255,255,255,0.1); 
+            display: flex; flex-direction: column; gap: 20px;
+        }
+
+        @media (max-width: 400px) { .container { padding: 20px 16px; gap: 16px; } }
+
+        .header-section { text-align: center; }
+        h2 { margin: 0 0 6px 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }
+        p.subtitle { color: var(--text-muted); font-size: 14px; margin: 0; font-weight: 500; }
+        
+        .toggle-container { 
+            display: flex; background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); padding: 4px; 
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.4);
+        }
+        .toggle-btn { 
+            flex: 1; padding: 12px; border: none; background: transparent; color: var(--text-muted); 
+            font-weight: 600; font-size: 14px; cursor: pointer; border-radius: 8px; transition: 0.3s ease; 
+        }
+        .toggle-btn.active { color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+        #android-toggle.active { background: var(--panel-bg); color: var(--accent-android); }
+        #ios-toggle.active { background: var(--panel-bg); color: var(--accent-ios); }
+
+        input[type="file"] { display: none; }
+        .upload-btn { 
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            width: 100%; background: var(--panel-bg); border: 2px dashed #48484A; color: var(--accent-ios); 
+            padding: 30px; border-radius: var(--radius-md); font-weight: 600; cursor: pointer; transition: 0.2s; gap: 10px;
+        }
+        .upload-btn svg { width: 32px; height: 32px; fill: currentColor; }
+        .upload-btn:hover, .upload-btn.dragover { background: var(--hover-bg); border-color: var(--accent-ios); }
+
+        .options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+        .option-item {
+            background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); padding: 12px; 
+            display: flex; align-items: center; justify-content: space-between;
+            font-size: 13px; font-weight: 500; color: #E5E5EA; border: 1px solid rgba(255,255,255,0.05);
+        }
+        .option-item select {
+            background: var(--panel-bg); color: white; border: 1px solid #48484A;
+            border-radius: 6px; padding: 4px; font-size: 12px; outline: none; cursor: pointer;
+        }
+        .option-item input[type="checkbox"] { accent-color: var(--accent-ios); width: 16px; height: 16px; cursor: pointer; }
+
+        .video-wrapper { 
+            position: relative; width: 100%; background: #000; border-radius: var(--radius-md); 
+            overflow: hidden; aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(255,255,255,0.05);
+        }
+        video { max-width: 100%; max-height: 100%; display: block; object-fit: contain; }
+        
+        .play-overlay {
+            position: absolute; bottom: 12px; right: 12px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);
+            border: none; color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; 
+            align-items: center; justify-content: center; cursor: pointer; z-index: 10; font-size: 16px; transition: 0.2s;
+        }
+        .play-overlay:hover { background: rgba(0,0,0,0.8); transform: scale(1.05); }
+        .hidden { display: none !important; }
+
+        .editor-section { 
+            background: var(--panel-bg); border-radius: var(--radius-md); 
+            padding: 20px 16px 16px; display: flex; flex-direction: column; gap: 12px;
+        }
+        .editor-header { display: flex; justify-content: space-between; font-size: 13px; color: #E5E5EA; font-weight: 600; }
+        .editor-header span span { color: var(--text-muted); font-weight: 500; margin-left: 4px; }
+        .hint-text { text-align: center; font-size: 11px; color: #636366; margin-top: 2px; }
+
+        .timeline-wrapper {
+            position: relative; width: 100%; padding: 12px 0; overflow-x: auto; overflow-y: hidden; 
+            border-radius: 6px; touch-action: none; scrollbar-width: none;
+        }
+        .timeline-wrapper::-webkit-scrollbar { display: none; }
+        .timeline-container { 
+            position: relative; height: 52px; width: 100%; background: #000; border-radius: 6px; 
+            user-select: none; transform-origin: left center; will-change: width;
+        }
+        .timeline-thumbnails { position: absolute; top: 0; left: 0; height: 100%; width: 100%; border-radius: 6px; overflow: hidden; }
+        
+        .trim-dim { position: absolute; top: 0; height: 100%; background: rgba(0,0,0,0.75); pointer-events: none; z-index: 5; }
+        .trim-dim.left { left: 0; border-radius: 6px 0 0 6px; }
+        .trim-dim.right { right: 0; border-radius: 0 6px 6px 0; }
+        .trim-box { 
+            position: absolute; top: 0; height: 100%; border-top: 3px solid var(--accent-yellow); 
+            border-bottom: 3px solid var(--accent-yellow); pointer-events: none; box-sizing: border-box; z-index: 6;
+        }
+        .trim-handle { 
+            position: absolute; top: -3px; height: calc(100% + 6px); width: 18px; background: var(--accent-yellow); 
+            cursor: ew-resize; display: flex; align-items: center; justify-content: center; z-index: 10; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4); pointer-events: auto; touch-action: none;
+        }
+        .trim-handle::after { content: ''; width: 2px; height: 18px; background: #000; opacity: 0.7; }
+        .trim-handle.left { left: 0; border-radius: 6px 0 0 6px; }
+        .trim-handle.right { right: 0; border-radius: 0 6px 6px 0; }
+
+        .cover-scrubber { 
+            position: absolute; top: -6px; height: calc(100% + 12px); width: 4px; background: #ffffff; 
+            border-radius: 2px; cursor: grab; z-index: 20; transform: translateX(-50%); 
+            box-shadow: 0 0 10px rgba(0,0,0,0.8); touch-action: none;
+        }
+        .cover-scrubber::before { content: ''; position: absolute; top: -4px; left: 50%; transform: translateX(-50%); width: 12px; height: 12px; background: #ffffff; border-radius: 50%; }
+        .cover-scrubber::after { content: ''; position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%); width: 12px; height: 12px; background: #ffffff; border-radius: 50%; }
+        .cover-scrubber:active { cursor: grabbing; background: #E5E5EA; }
+        
+        .process-btn { 
+            position: relative; overflow: hidden; background: #FFFFFF; color: #000000; width: 100%; 
+            padding: 18px; border-radius: var(--radius-md); font-size: 16px; font-weight: 700; border: none; 
+            cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 15px rgba(255,255,255,0.1);
+        }
+        .process-btn:hover:not(:disabled) { background: #E5E5EA; transform: translateY(-1px); }
+        .process-btn:disabled { background: var(--hover-bg); color: #fff; cursor: not-allowed; transform: none; box-shadow: none; }
+        
+        .progress-fill {
+            position: absolute; top: 0; left: 0; height: 100%; width: 0%; background: var(--accent-ios); 
+            z-index: 1; transition: width 0.3s linear; opacity: 0.3;
+        }
+        .btn-text { position: relative; z-index: 2; }
+
+        .log-text { text-align: center; font-size: 13px; color: var(--text-muted); height: 20px; font-weight: 500; }
+        .log-text.error { color: #FF453A; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="header-section">
+            <h2>Live Photo Studio Pro</h2>
+            <p class="subtitle">Universal Engine • Native Sorting & Metadata</p>
+        </div>
+
+        <div class="toggle-container">
+            <button id="android-toggle" class="toggle-btn active" onclick="setMode('android')">Universal Android</button>
+            <button id="ios-toggle" class="toggle-btn" onclick="setMode('ios')">Apple iOS</button>
+        </div>
+
+        <label class="upload-btn" id="upload-label">
+            <svg viewBox="0 0 24 24"><path d="M12 4L12 16M12 4L8 8M12 4L16 8M4 17L4 19C4 20.1046 4.89543 21 6 21L18 21C19.1046 21 20 20.1046 20 19L20 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            Select or Drop Video
+            <input type="file" id="videoUpload" accept="video/mp4,video/quicktime">
+        </label>
+
+        <div id="videoContainer" class="video-wrapper hidden">
+            <video id="videoPreview" playsinline muted></video>
+            <button id="playBtn" class="play-overlay" onclick="togglePlay()">▶</button>
+        </div>
+
+        <div id="editorPanel" class="editor-section hidden">
+            <div class="editor-header">
+                <div id="coverText">Cover <span>0.0s</span></div>
+                <div id="trimText">Trim <span>Full</span></div>
+            </div>
+
+            <div class="timeline-wrapper" id="timelineWrapper">
+                <div class="timeline-container" id="timeline">
+                    <div class="timeline-thumbnails" id="thumbnails"></div>
+                    <div class="trim-dim left" id="dimLeft"></div>
+                    <div class="trim-dim right" id="dimRight"></div>
+                    <div class="trim-box" id="trimBox">
+                        <div class="trim-handle left" id="handleLeft"></div>
+                        <div class="trim-handle right" id="handleRight"></div>
+                    </div>
+                    <div class="cover-scrubber" id="handleCover"></div>
+                </div>
+            </div>
+            <div class="hint-text">Pinch or scroll to zoom • Double-tap to reset</div>
+            
+            <div class="options-grid">
+                <label class="option-item">
+                    <span>Mute Audio</span>
+                    <input type="checkbox" id="muteToggle" onchange="State.muteAudio = this.checked">
+                </label>
+                <label class="option-item">
+                    <span>Spoof Device</span>
+                    <select id="deviceSpoof" onchange="State.spoofDevice = this.value">
+                        <option value="Apple">iPhone 15 Pro</option>
+                        <option value="Samsung">Galaxy S24 Ultra</option>
+                        <option value="Google">Pixel 8 Pro</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+
+        <button id="processBtn" class="process-btn hidden" onclick="processVideo()">
+            <div class="progress-fill" id="progressFill"></div>
+            <span class="btn-text" id="btnText">Create Live Photo</span>
+        </button>
+        <div id="logText" class="log-text"></div>
+        <canvas id="hiddenCanvas" class="hidden"></canvas>
+    </div>
+
+    <script>
+        const State = {
+            mode: 'android', file: null, url: null, originalDate: null, duration: 0,
+            startTime: 0, endTime: 0, coverTime: 0, uuid: null, imageBlob: null,
+            muteAudio: false, spoofDevice: 'Apple',
+            reset() {
+                if (this.url) URL.revokeObjectURL(this.url);
+                this.file = null; this.url = null; this.imageBlob = null;
+                this.uuid = crypto.randomUUID().toUpperCase();
+                this.originalDate = new Date();
+            }
+        };
+
+        let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
+        let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
+        let ffmpegInstance = null, isFfmpegLoading = false;
+
+        const videoUpload = document.getElementById('videoUpload');
+        const uploadLabel = document.getElementById('upload-label');
+        const videoPreview = document.getElementById('videoPreview');
+        const playBtn = document.getElementById('playBtn');
+        const editorPanel = document.getElementById('editorPanel');
+        const processBtn = document.getElementById('processBtn');
+        const hiddenCanvas = document.getElementById('hiddenCanvas');
+        const timeline = document.getElementById('timeline');
+        const timelineWrapper = document.getElementById('timelineWrapper');
+
+        function setMode(mode) {
+            State.mode = mode;
+            document.getElementById('android-toggle').classList.toggle('active', mode === 'android');
+            document.getElementById('ios-toggle').classList.toggle('active', mode === 'ios');
+        }
+
+        function updateLog(msg, type = "info") { 
+            const el = document.getElementById('logText');
+            el.innerText = msg; el.className = `log-text ${type}`;
+        }
+
+        // --- GITHUB PAGES FIX: Fetching FFmpeg securely via toBlobURL ---
+        async function preloadFFmpeg() {
+            if (ffmpegInstance || isFfmpegLoading) return;
+            isFfmpegLoading = true;
+            try {
+                const { FFmpeg } = window.FFmpegWASM;
+                const { toBlobURL } = window.FFmpegUtil;
+                ffmpegInstance = new FFmpeg();
+
+                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                
+                // toBlobURL converts the CDN link into a local blob. 
+                // This bypasses the Cross-Origin Worker block on GitHub Pages!
+                await ffmpegInstance.load({
+                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                });
+                console.log("FFmpeg core loaded successfully.");
+            } catch (err) {
+                console.warn("FFmpeg preload failed. Will retry.", err);
+                ffmpegInstance = null;
+            } finally { isFfmpegLoading = false; }
+        }
+
+        uploadLabel.addEventListener('dragover', e => { e.preventDefault(); uploadLabel.classList.add('dragover'); });
+        uploadLabel.addEventListener('dragleave', () => uploadLabel.classList.remove('dragover'));
+        uploadLabel.addEventListener('drop', e => {
+            e.preventDefault(); uploadLabel.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        videoUpload.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
+
+        function handleFile(file) {
+            if (!file || !file.type.startsWith('video/')) return updateLog("Please select a valid video.", "error");
+            State.reset();
+            State.file = file;
+            State.originalDate = new Date(file.lastModified || Date.now()); 
+            State.url = URL.createObjectURL(file);
+            videoPreview.src = State.url;
+            
+            document.getElementById('videoContainer').classList.remove('hidden');
+            editorPanel.classList.remove('hidden');
+            processBtn.classList.remove('hidden');
+            updateLog("");
+            
+            if (isPlaying) togglePlay(); 
+            preloadFFmpeg();
+
+            videoPreview.onloadedmetadata = () => {
+                State.duration = videoPreview.duration;
+                State.startTime = 0; State.endTime = State.duration; State.coverTime = Math.min(0.5, State.duration / 2);
+                timeline.style.width = '100%'; timelineWrapper.scrollLeft = 0;
+                updateUI(); videoPreview.currentTime = State.coverTime; generateFilmstrip();
+            };
+        }
+
+        async function generateFilmstrip() {
+            const genId = ++filmstripGenerationId; 
+            const containerWidth = timeline.offsetWidth;
+            const thumbHeight = 52;
+            const renderScale = window.devicePixelRatio || 1;
+            
+            const hiddenVid = document.createElement('video');
+            hiddenVid.muted = true; hiddenVid.playsInline = true; hiddenVid.src = State.url;
+            await new Promise(r => {
+                if (hiddenVid.readyState >= 2) r();
+                else hiddenVid.addEventListener('loadeddata', r, { once: true });
+            });
+            
+            if (filmstripGenerationId !== genId) return;
+            
+            const vRatio = hiddenVid.videoWidth / hiddenVid.videoHeight;
+            let thumbWidth = thumbHeight * vRatio;
+            let numThumbs = Math.min(50, Math.ceil(containerWidth / thumbWidth));
+            thumbWidth = containerWidth / numThumbs;
+
+            const visibleCenter = timelineWrapper.scrollLeft + (timelineWrapper.clientWidth / 2);
+            let indices = Array.from({ length: numThumbs }, (_, i) => i).sort((a, b) => 
+                Math.abs((a + 0.5) * thumbWidth - visibleCenter) - Math.abs((b + 0.5) * thumbWidth - visibleCenter)
+            );
+
+            const newCanvas = document.createElement('canvas');
+            newCanvas.width = (numThumbs * thumbWidth) * renderScale;
+            newCanvas.height = thumbHeight * renderScale;
+            newCanvas.style.width = '100%'; newCanvas.style.height = '100%';
+            
+            const ctx = newCanvas.getContext('2d', { alpha: false });
+            ctx.scale(renderScale, renderScale);
+
+            const oldCanvas = document.getElementById('thumbnails').querySelector('canvas');
+            if (oldCanvas) ctx.drawImage(oldCanvas, 0, 0, numThumbs * thumbWidth, thumbHeight);
+            
+            document.getElementById('thumbnails').innerHTML = '';
+            document.getElementById('thumbnails').appendChild(newCanvas);
+
+            const step = State.duration / numThumbs;
+            for (let i of indices) {
+                if (filmstripGenerationId !== genId) return;
+                hiddenVid.currentTime = i * step + (step/2);
+                await new Promise(r => { hiddenVid.addEventListener('seeked', r, {once: true}); setTimeout(r, 200); });
+                if (filmstripGenerationId !== genId) return;
+                ctx.drawImage(hiddenVid, i * thumbWidth, 0, thumbWidth, thumbHeight);
+            }
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            if (isPlaying) {
+                playBtn.innerText = "⏸"; videoPreview.currentTime = State.startTime; videoPreview.play(); loopPreview();
+            } else {
+                playBtn.innerText = "▶"; videoPreview.pause(); cancelAnimationFrame(loopAnimationFrame); videoPreview.currentTime = State.coverTime;
+            }
+        }
+        function loopPreview() {
+            if (!isPlaying) return;
+            if (videoPreview.currentTime >= State.endTime - 0.05) videoPreview.currentTime = State.startTime;
+            loopAnimationFrame = requestAnimationFrame(loopPreview);
+        }
+
+        function onPointerDown(e, handle) {
+            e.preventDefault(); if (isPlaying) togglePlay();
+            isDragging = handle; document.body.classList.add('dragging'); e.target.setPointerCapture(e.pointerId); 
+        }
+        document.getElementById('handleLeft').addEventListener('pointerdown', e => onPointerDown(e, 'left'));
+        document.getElementById('handleRight').addEventListener('pointerdown', e => onPointerDown(e, 'right'));
+        document.getElementById('handleCover').addEventListener('pointerdown', e => onPointerDown(e, 'cover'));
+
+        window.addEventListener('pointermove', e => {
+            if (!isDragging) return;
+            const clientX = e.clientX || (e.touches ? e.touches[0].clientX : 0);
+            const wrapperRect = timelineWrapper.getBoundingClientRect();
+            if (clientX < wrapperRect.left) scrollSpeed = (clientX - wrapperRect.left) * 0.15;
+            else if (clientX > wrapperRect.right) scrollSpeed = (clientX - wrapperRect.right) * 0.15;
+            else scrollSpeed = 0;
+            if (scrollSpeed !== 0 && !autoScrollRaf) startAutoScroll(clientX);
+            else updateTimeFromX(clientX);
+        });
+
+        window.addEventListener('pointerup', e => {
+            if (!isDragging) return;
+            if (e.target.releasePointerCapture) e.target.releasePointerCapture(e.pointerId);
+            document.body.classList.remove('dragging'); scrollSpeed = 0; 
+            if (autoScrollRaf) { cancelAnimationFrame(autoScrollRaf); autoScrollRaf = null; }
+            isDragging = null;
+        });
+
+        function startAutoScroll(clientX) {
+            const scrollLoop = () => {
+                if (!isDragging || scrollSpeed === 0) { autoScrollRaf = null; return; }
+                timelineWrapper.scrollLeft += scrollSpeed; updateTimeFromX(clientX);
+                autoScrollRaf = requestAnimationFrame(scrollLoop);
+            };
+            autoScrollRaf = requestAnimationFrame(scrollLoop);
+        }
+
+        function updateTimeFromX(clientX) {
+            const rect = timeline.getBoundingClientRect(); 
+            let ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            let time = ratio * State.duration;
+            const minTrim = State.duration * (38 / timeline.offsetWidth); 
+
+            if (isDragging === 'left') {
+                State.startTime = Math.max(0, Math.min(time, State.endTime - minTrim));
+                if (State.coverTime < State.startTime) State.coverTime = State.startTime;
+                videoPreview.currentTime = State.startTime;
+            } else if (isDragging === 'right') {
+                State.endTime = Math.max(State.startTime + minTrim, Math.min(time, State.duration));
+                if (State.coverTime > State.endTime) State.coverTime = State.endTime;
+                videoPreview.currentTime = State.endTime;
+            } else if (isDragging === 'cover') {
+                State.coverTime = Math.max(State.startTime, Math.min(time, State.endTime));
+                videoPreview.currentTime = State.coverTime;
+            }
+            updateUI();
+        }
+
+        function updateUI() {
+            const pStart = (State.startTime / State.duration) * 100;
+            const pEnd = (State.endTime / State.duration) * 100;
+            const pCover = (State.coverTime / State.duration) * 100;
+            document.getElementById('handleCover').style.left = `${pCover}%`;
+            document.getElementById('trimBox').style.left = `${pStart}%`;
+            document.getElementById('trimBox').style.width = `${pEnd - pStart}%`;
+            document.getElementById('dimLeft').style.width = `${pStart}%`;
+            document.getElementById('dimRight').style.width = `${100 - pEnd}%`;
+            document.getElementById('coverText').innerHTML = `Cover <span>${State.coverTime.toFixed(1)}s</span>`;
+            document.getElementById('trimText').innerHTML = (State.startTime > 0.1 || State.endTime < State.duration - 0.1) ? 
+                `Trim <span>${(State.endTime - State.startTime).toFixed(1)}s</span>` : `Trim <span>Full</span>`;
+        }
+
+        let initialPinchDist = 0, initialTimelineWidth = 0, pinchCenterRatio = 0;
+        timelineWrapper.addEventListener('touchstart', e => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                initialPinchDist = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
+                initialTimelineWidth = parseFloat(timeline.style.width) || 100;
+                pinchCenterRatio = (((e.touches[0].clientX + e.touches[1].clientX)/2) - timeline.getBoundingClientRect().left) / timeline.offsetWidth;
+            }
+        }, {passive: false});
+
+        timelineWrapper.addEventListener('touchmove', e => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const dist = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
+                let newWidthPercent = Math.max(100, Math.min(initialTimelineWidth * (dist / initialPinchDist), 4000));
+                timeline.style.width = `${newWidthPercent}%`;
+                const pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                timelineWrapper.scrollLeft = (timeline.offsetWidth * pinchCenterRatio) - (pinchCenterX - timelineWrapper.getBoundingClientRect().left);
+                updateUI();
+            }
+        }, {passive: false});
+
+        timelineWrapper.addEventListener('touchend', e => {
+            if (e.touches.length < 2 && initialPinchDist > 0) { initialPinchDist = 0; generateFilmstrip(); }
+        });
+        
+        timelineWrapper.addEventListener('wheel', e => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                const rect = timeline.getBoundingClientRect();
+                const pointerRatio = (e.clientX - rect.left) / timeline.offsetWidth;
+                let newWidth = Math.max(100, Math.min((parseFloat(timeline.style.width)||100) * (e.deltaY > 0 ? 0.9 : 1.1), 4000));
+                timeline.style.width = `${newWidth}%`;
+                timelineWrapper.scrollLeft = (timeline.offsetWidth * pointerRatio) - (e.clientX - timelineWrapper.getBoundingClientRect().left);
+                updateUI();
+                clearTimeout(window.wheelTimer); window.wheelTimer = setTimeout(generateFilmstrip, 300);
+            }
+        }, {passive: false});
+
+        let lastTap = 0;
+        timelineWrapper.addEventListener('pointerup', (e) => {
+            if (Date.now() - lastTap < 300 && !isDragging) {
+                e.preventDefault(); timeline.style.width = '100%'; generateFilmstrip();
+            }
+            lastTap = Date.now();
+        });
+
+        videoPreview.addEventListener('seeked', () => {
+            if (!isDragging && !isPlaying && Math.abs(videoPreview.currentTime - State.coverTime) < 0.1) {
+                hiddenCanvas.width = videoPreview.videoWidth; hiddenCanvas.height = videoPreview.videoHeight;
+                hiddenCanvas.getContext('2d').drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                hiddenCanvas.toBlob(blob => { State.imageBlob = blob; }, 'image/jpeg', 0.95);
+            }
+        });
+
+        async function processVideo() {
+            if (isPlaying) togglePlay();
+            if (!State.file || !State.imageBlob) {
+                videoPreview.currentTime = State.coverTime; return updateLog("Extracting cover frame, please try again.", "error");
+            }
+            
+            processBtn.disabled = true;
+            document.getElementById('btnText').innerText = "Initializing Engine...";
+            document.getElementById('progressFill').style.width = "5%";
+            
+            try {
+                if (!ffmpegInstance) await preloadFFmpeg();
+                if (!ffmpegInstance) throw new Error("FFmpeg engine failed to load. Are you connected to the internet?");
+
+                ffmpegInstance.on('progress', ({ progress }) => {
+                    const percent = Math.max(5, Math.min(90, Math.round(progress * 100)));
+                    document.getElementById('progressFill').style.width = `${percent}%`;
+                    document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
+                });
+                
+                await ffmpegInstance.writeFile('input.mp4', await window.FFmpegUtil.fetchFile(State.file));
+                
+                let args = [
+                    '-ss', State.startTime.toString(), '-i', 'input.mp4', 
+                    '-t', (State.endTime - State.startTime).toString(),
+                    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'
+                ];
+
+                if (State.muteAudio) args.push('-an');
+                else args.push('-c:a', 'aac', '-b:a', '128k');
+
+                const dateISO = State.originalDate.toISOString();
+                args.push('-metadata', `creation_time=${dateISO}`);
+
+                let finalVideoFile;
+                if (State.mode === 'ios') {
+                    args.push('-movflags', 'use_metadata_tags', '-map_metadata', '0', '-metadata:s:v:0', `com.apple.quicktime.content.identifier=${State.uuid}`, 'output.mov');
+                    await ffmpegInstance.exec(args);
+                    const data = await ffmpegInstance.readFile('output.mov');
+                    finalVideoFile = new Blob([data.buffer], { type: 'video/quicktime' });
+                } else {
+                    args.push('output.mp4');
+                    await ffmpegInstance.exec(args);
+                    const data = await ffmpegInstance.readFile('output.mp4');
+                    finalVideoFile = new Blob([data.buffer], { type: 'video/mp4' });
+                }
+
+                document.getElementById('btnText').innerText = "Applying Metadata...";
+                document.getElementById('progressFill').style.width = "95%";
+
+                const imageBytes = await applyEXIFData();
+                if (State.mode === 'android') await createAndroidUniversal(finalVideoFile, imageBytes);
+                else await createIOSBundle(finalVideoFile, imageBytes);
+                
+                updateLog("✅ Live Photo Created Successfully!");
+            } catch (err) {
+                console.error(err); updateLog("Error: " + err.message, "error");
+            } finally {
+                processBtn.disabled = false;
+                document.getElementById('btnText').innerText = "Create Live Photo";
+                document.getElementById('progressFill').style.width = "0%";
+            }
+        }
+
+        async function applyEXIFData() {
+            const reader = new FileReader();
+            reader.readAsDataURL(State.imageBlob);
+            await new Promise(r => reader.onload = r);
+            let jpegData = reader.result;
+
+            let exifObj = {"0th": {}, "Exif": {}};
+            try { exifObj = piexif.load(jpegData); } catch(e) {}
+
+            const pad = n => String(n).padStart(2, '0');
+            const d = State.originalDate;
+            const dateStr = `${d.getFullYear()}:${pad(d.getMonth()+1)}:${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
+            exifObj["0th"][piexif.ImageIFD.DateTime] = dateStr;
+            exifObj["Exif"][piexif.ExifIFD.DateTimeOriginal] = dateStr;
+            exifObj["Exif"][piexif.ExifIFD.DateTimeDigitized] = dateStr;
+
+            const devMap = {
+                'Apple': { make: 'Apple', model: 'iPhone 15 Pro' },
+                'Samsung': { make: 'samsung', model: 'SM-S928U' },
+                'Google': { make: 'Google', model: 'Pixel 8 Pro' }
+            };
+            exifObj["0th"][piexif.ImageIFD.Make] = devMap[State.spoofDevice].make;
+            exifObj["0th"][piexif.ImageIFD.Model] = devMap[State.spoofDevice].model;
+
+            if (State.mode === 'ios') {
+                exifObj["Exif"][piexif.ExifIFD.ImageUniqueID] = State.uuid;
+                exifObj["0th"][piexif.ImageIFD.DocumentName] = State.uuid;
+            }
+
+            const newJpegBase64 = piexif.insert(piexif.dump(exifObj), jpegData);
+            const byteString = atob(newJpegBase64.split(',')[1]);
+            const ia = new Uint8Array(byteString.length);
+            for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+            return ia;
+        }
+
+        async function createAndroidUniversal(videoData, imageBytes) {
+            const videoArrayBuffer = await videoData.arrayBuffer();
+            const videoLength = videoArrayBuffer.byteLength;
+            const presentationTimeUs = Math.max(0, Math.round((State.coverTime - State.startTime) * 1000000));
+
+            const xmpData = `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0-jc003">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+        xmlns:Container="http://ns.google.com/photos/1.0/container/"
+        xmlns:Item="http://ns.google.com/photos/1.0/container/item/"
+        xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"
+        xmlns:xiaomi="http://ns.xiaomi.com/photos/1.0/camera/"
+      GCamera:MotionPhoto="1"
+      GCamera:MotionPhotoVersion="1"
+      GCamera:MotionPhotoPresentationTimestampUs="${presentationTimeUs}"
+      GCamera:MicroVideo="1"
+      GCamera:MicroVideoVersion="1"
+      GCamera:MicroVideoOffset="${videoLength}"
+      GCamera:MicroVideoPresentationTimestampUs="${presentationTimeUs}"
+      xiaomi:MicroVideo="1"
+      xiaomi:MicroVideoVersion="1">
+      <Container:Directory>
+        <rdf:Seq>
+          <rdf:li rdf:parseType="Resource"><Container:Item Item:Semantic="Primary" Item:Mime="image/jpeg" Item:Length="0"/></rdf:li>
+          <rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="${videoLength}" Item:Padding="0"/></rdf:li>
+        </rdf:Seq>
+      </Container:Directory>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>`;
+
+            const xmpBuffer = new TextEncoder().encode(xmpData);
+            const namespace = new TextEncoder().encode("http://ns.adobe.com/xap/1.0/\0");
+            const app1Header = new Uint8Array([0xFF, 0xE1, ((namespace.length + xmpBuffer.length + 2) >> 8) & 0xFF, (namespace.length + xmpBuffer.length + 2) & 0xFF]);
+            
+            const app1Segment = new Uint8Array(app1Header.length + namespace.length + xmpBuffer.length);
+            app1Segment.set(app1Header, 0); app1Segment.set(namespace, app1Header.length); app1Segment.set(xmpBuffer, app1Header.length + namespace.length);
+
+            let insertPos = 2; 
+            if (imageBytes[insertPos] === 0xFF && imageBytes[insertPos+1] === 0xE0) {
+                insertPos += 2 + ((imageBytes[insertPos+2] << 8) | imageBytes[insertPos+3]);
+            }
+
+            const finalBuffer = new Uint8Array(insertPos + app1Segment.length + (imageBytes.length - insertPos) + videoLength);
+            finalBuffer.set(imageBytes.subarray(0, insertPos), 0);
+            finalBuffer.set(app1Segment, insertPos);
+            finalBuffer.set(imageBytes.subarray(insertPos), insertPos + app1Segment.length);
+            finalBuffer.set(new Uint8Array(videoArrayBuffer), insertPos + app1Segment.length + (imageBytes.length - insertPos));
+
+            triggerDownload(new Blob([finalBuffer], { type: 'image/jpeg' }), `MotionPhoto_${Date.now()}.jpg`);
+        }
+
+        async function createIOSBundle(videoData, imageBytes) {
+            const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
+            const baseName = `LivePhoto_${Date.now()}`;
+            const jpgFile = new File([finalImageBlob], `${baseName}.jpg`, { type: "image/jpeg" });
+            const movFile = new File([videoData], `${baseName}.mov`, { type: "video/quicktime" });
+
+            if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
+                try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); } 
+                catch (err) { fallbackZipDownload(jpgFile, movFile); }
+            } else fallbackZipDownload(jpgFile, movFile);
+        }
+
+        async function fallbackZipDownload(jpg, mov) {
+            updateLog("Bundling format...");
+            try {
+                const zip = new JSZip(); zip.file(jpg.name, jpg); zip.file(mov.name, mov);
+                const content = await zip.generateAsync({ type: "blob" });
+                triggerDownload(content, "LivePhoto.zip");
+                updateLog("✅ Zip saved. Airdrop to iPhone or extract to Photos.");
+            } catch (err) {
+                triggerDownload(jpg, jpg.name); setTimeout(() => triggerDownload(mov, mov.name), 500);
+            }
+        }
+
+        function triggerDownload(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a); 
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+    </script>
+</body>
+</html>

@@ -6,7 +6,7 @@
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
     
-    <!-- We only keep standard libraries here. FFmpeg is loaded dynamically via ES Modules below! -->
+    <!-- 100% Native Implementation: No FFmpeg, No Web Workers, No CORS Issues -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -153,7 +153,7 @@
     <div class="container">
         <div class="header-section">
             <h2>Live Photo Studio Pro</h2>
-            <p class="subtitle">Universal Engine • Native Sorting & Metadata</p>
+            <p class="subtitle">Universal Engine • Native Web API</p>
         </div>
 
         <div class="toggle-container">
@@ -164,7 +164,7 @@
         <label class="upload-btn" id="upload-label">
             <svg viewBox="0 0 24 24"><path d="M12 4L12 16M12 4L8 8M12 4L16 8M4 17L4 19C4 20.1046 4.89543 21 6 21L18 21C19.1046 21 20 20.1046 20 19L20 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
             Select or Drop Video
-            <input type="file" id="videoUpload" accept="video/mp4,video/quicktime">
+            <input type="file" id="videoUpload" accept="video/mp4,video/quicktime,video/webm">
         </label>
 
         <div id="videoContainer" class="video-wrapper hidden">
@@ -208,7 +208,7 @@
             </div>
         </div>
 
-        <button id="processBtn" class="process-btn hidden" onclick="processVideo()">
+        <button id="processBtn" class="process-btn hidden" onclick="processVideoNative()">
             <div class="progress-fill" id="progressFill"></div>
             <span class="btn-text" id="btnText">Create Live Photo</span>
         </button>
@@ -217,13 +217,6 @@
     </div>
 
     <script>
-        // Store FFmpeg dynamically loaded modules here so they don't rely on the window object
-        let FFmpegClass = null;
-        let fetchFileFn = null;
-        let toBlobURLFn = null;
-        let ffmpegInstance = null;
-        let isFfmpegLoading = false;
-
         const State = {
             mode: 'android', file: null, url: null, originalDate: null, duration: 0,
             startTime: 0, endTime: 0, coverTime: 0, uuid: null, imageBlob: null,
@@ -260,46 +253,6 @@
             el.innerText = msg; el.className = `log-text ${type}`;
         }
 
-        // --- GITHUB PAGES FIX: Dynamic ES Modules ---
-        // This imports the JS securely and guarantees the library works without relying on global variables.
-        async function preloadFFmpeg() {
-            if (ffmpegInstance || isFfmpegLoading) return;
-            isFfmpegLoading = true;
-            try {
-                // Dynamically import the ES Modules natively.
-                const ffmpegPkg = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
-                const utilPkg = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
-                
-                FFmpegClass = ffmpegPkg.FFmpeg;
-                fetchFileFn = utilPkg.fetchFile;
-                toBlobURLFn = utilPkg.toBlobURL;
-                
-                ffmpegInstance = new FFmpegClass();
-
-                // Attach global progress listener
-                ffmpegInstance.on('progress', ({ progress }) => {
-                    const percent = Math.max(5, Math.min(90, Math.round(progress * 100)));
-                    document.getElementById('progressFill').style.width = `${percent}%`;
-                    document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
-                });
-
-                // toBlobURL converts scripts to blob:// URLs to bypass CORS entirely
-                const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-                await ffmpegInstance.load({
-                    coreURL: await toBlobURLFn(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                    wasmURL: await toBlobURLFn(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-                });
-                
-                console.log("FFmpeg Core Loaded via ES Modules successfully.");
-            } catch (err) {
-                console.error("FFmpeg preload failed:", err);
-                ffmpegInstance = null;
-                updateLog("Network error: Could not load FFmpeg engine.", "error");
-            } finally { 
-                isFfmpegLoading = false; 
-            }
-        }
-
         uploadLabel.addEventListener('dragover', e => { e.preventDefault(); uploadLabel.classList.add('dragover'); });
         uploadLabel.addEventListener('dragleave', () => uploadLabel.classList.remove('dragover'));
         uploadLabel.addEventListener('drop', e => {
@@ -322,7 +275,6 @@
             updateLog("");
             
             if (isPlaying) togglePlay(); 
-            preloadFFmpeg();
 
             videoPreview.onloadedmetadata = () => {
                 State.duration = videoPreview.duration;
@@ -521,60 +473,101 @@
             }
         });
 
-        async function processVideo() {
+        // 100% NATIVE BROWSER PROCESSING (No FFmpeg)
+        async function processVideoNative() {
             if (isPlaying) togglePlay();
             if (!State.file || !State.imageBlob) {
                 videoPreview.currentTime = State.coverTime; return updateLog("Extracting cover frame, please try again.", "error");
             }
             
             processBtn.disabled = true;
-            document.getElementById('btnText').innerText = "Initializing Engine...";
+            document.getElementById('btnText').innerText = "Recording Output...";
             document.getElementById('progressFill').style.width = "5%";
             
             try {
-                if (!ffmpegInstance) await preloadFFmpeg();
-                if (!ffmpegInstance || !fetchFileFn) throw new Error("FFmpeg engine failed to load. Check your network.");
-                
-                // Write Input File securely using the dynamic utility
-                await ffmpegInstance.writeFile('input.mp4', await fetchFileFn(State.file));
-                
-                let args = [
-                    '-ss', State.startTime.toString(), '-i', 'input.mp4', 
-                    '-t', (State.endTime - State.startTime).toString(),
-                    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'
-                ];
+                // Seek to start
+                videoPreview.currentTime = State.startTime;
+                await new Promise(r => { videoPreview.addEventListener('seeked', r, {once: true}); });
 
-                if (State.muteAudio) args.push('-an');
-                else args.push('-c:a', 'aac', '-b:a', '128k');
-
-                const dateISO = State.originalDate.toISOString();
-                args.push('-metadata', `creation_time=${dateISO}`);
-
-                if (State.mode === 'ios') {
-                    args.push('-movflags', 'use_metadata_tags', '-map_metadata', '0', '-metadata:s:v:0', `com.apple.quicktime.content.identifier=${State.uuid}`, 'output.mov');
+                // Try to get native stream, fallback to canvas stream if blocked by Safari
+                let stream;
+                if (videoPreview.captureStream) {
+                    stream = videoPreview.captureStream();
+                } else if (videoPreview.mozCaptureStream) {
+                    stream = videoPreview.mozCaptureStream();
                 } else {
-                    args.push('output.mp4');
+                    // Universal Canvas Fallback for Apple Safari
+                    hiddenCanvas.width = videoPreview.videoWidth;
+                    hiddenCanvas.height = videoPreview.videoHeight;
+                    stream = hiddenCanvas.captureStream(30);
+                    const ctx = hiddenCanvas.getContext('2d');
+                    
+                    const drawLoop = () => {
+                        if (videoPreview.currentTime <= State.endTime) {
+                            ctx.drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                            requestAnimationFrame(drawLoop);
+                        }
+                    };
+                    requestAnimationFrame(drawLoop);
                 }
 
-                // Execute the FFmpeg arguments (v0.12 format)
-                await ffmpegInstance.exec(args);
+                if (State.muteAudio && stream.getAudioTracks) {
+                    stream.getAudioTracks().forEach(track => stream.removeTrack(track));
+                }
+
+                // Determine best supported Mime Type
+                let mimeType = 'video/mp4'; // iOS Prefers MP4
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'video/webm;codecs=vp8,opus';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        mimeType = 'video/webm'; // Universal Fallback
+                    }
+                }
+
+                const recorder = new MediaRecorder(stream, { mimeType: mimeType });
+                const chunks = [];
+                recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+                // Create a promise that resolves when recording finishes
+                const recordingComplete = new Promise(resolve => {
+                    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+                });
+
+                // Start Process
+                videoPreview.play();
+                recorder.start();
+
+                // Progress loop
+                const duration = State.endTime - State.startTime;
+                await new Promise(resolve => {
+                    const checkProgress = () => {
+                        const current = videoPreview.currentTime - State.startTime;
+                        const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
+                        document.getElementById('progressFill').style.width = `${percent}%`;
+                        document.getElementById('btnText').innerText = `Recording Output... ${percent}%`;
+
+                        if (videoPreview.currentTime >= State.endTime) {
+                            videoPreview.pause();
+                            recorder.stop();
+                            resolve();
+                        } else {
+                            requestAnimationFrame(checkProgress);
+                        }
+                    };
+                    requestAnimationFrame(checkProgress);
+                });
+
+                const finalVideoFile = await recordingComplete;
 
                 document.getElementById('btnText').innerText = "Applying Metadata...";
                 document.getElementById('progressFill').style.width = "95%";
 
-                // Extract Output File
-                let finalVideoFile;
-                if (State.mode === 'ios') {
-                    const data = await ffmpegInstance.readFile('output.mov');
-                    finalVideoFile = new Blob([data.buffer], { type: 'video/quicktime' });
-                } else {
-                    const data = await ffmpegInstance.readFile('output.mp4');
-                    finalVideoFile = new Blob([data.buffer], { type: 'video/mp4' });
-                }
-
                 const imageBytes = await applyEXIFData();
-                if (State.mode === 'android') await createAndroidUniversal(finalVideoFile, imageBytes);
-                else await createIOSBundle(finalVideoFile, imageBytes);
+                if (State.mode === 'android') {
+                    await createAndroidUniversal(finalVideoFile, imageBytes);
+                } else {
+                    await createIOSBundle(finalVideoFile, imageBytes);
+                }
                 
                 updateLog("✅ Live Photo Created Successfully!");
             } catch (err) {
@@ -583,6 +576,7 @@
                 processBtn.disabled = false;
                 document.getElementById('btnText').innerText = "Create Live Photo";
                 document.getElementById('progressFill').style.width = "0%";
+                videoPreview.currentTime = State.coverTime;
             }
         }
 
@@ -679,9 +673,13 @@
 
         async function createIOSBundle(videoData, imageBytes) {
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
-            const baseName = `LivePhoto_${Date.now()}`;
-            const jpgFile = new File([finalImageBlob], `${baseName}.jpg`, { type: "image/jpeg" });
-            const movFile = new File([videoData], `${baseName}.mov`, { type: "video/quicktime" });
+            
+            // To ensure iOS links them automatically without FFmpeg QuickTime tags, 
+            // the exact identical filename formatting is crucial.
+            const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
+            
+            const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
+            const movFile = new File([videoData], `${baseName}.MP4`, { type: videoData.type });
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
                 try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); } 
@@ -694,7 +692,7 @@
             try {
                 const zip = new JSZip(); zip.file(jpg.name, jpg); zip.file(mov.name, mov);
                 const content = await zip.generateAsync({ type: "blob" });
-                triggerDownload(content, "LivePhoto.zip");
+                triggerDownload(content, "LivePhoto_Bundle.zip");
                 updateLog("✅ Zip saved. Airdrop to iPhone or extract to Photos.");
             } catch (err) {
                 triggerDownload(jpg, jpg.name); setTimeout(() => triggerDownload(mov, mov.name), 500);

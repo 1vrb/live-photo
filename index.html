@@ -474,9 +474,7 @@
         });
 
         // ==========================================
-        // SMART RECORDING & NATIVE ENGINE
-        // Re-encodes using Canvas/WebAudio ONLY if the video is trimmed or audio is muted.
-        // Otherwise, uses the raw original file directly for the best possible quality.
+        // FIXED SMART ENGINE: Audio preserved on trim
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
@@ -490,12 +488,11 @@
             
             let audioCtx = null;
             let sourceNode = null;
+            let processVid = null; 
 
             try {
                 let finalVideoFile;
                 
-                // Determine if we actually need to re-record the video 
-                // We only re-record if it's trimmed or if the user explicitly requested "Mute Audio"
                 const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
                 const needsReencoding = isTrimmed || State.muteAudio;
 
@@ -504,15 +501,19 @@
                     document.getElementById('btnText').innerText = "Using Original Video...";
                     document.getElementById('progressFill').style.width = "50%";
                     finalVideoFile = State.file;
-                    await new Promise(r => setTimeout(r, 600)); // Tiny pause so the UI doesn't look like it glitched
+                    await new Promise(r => setTimeout(r, 600)); 
                 } else {
                     document.getElementById('btnText').innerText = "Recording Output...";
                     
-                    // 1. Create a hidden video element to process audio/video properly
-                    const processVid = document.createElement('video');
+                    // 1. Create a hidden video element and ATTACH it to the DOM. 
+                    // (Browsers disable audio processing entirely for detached elements to save battery)
+                    processVid = document.createElement('video');
                     processVid.src = State.url;
                     processVid.playsInline = true;
-                    processVid.muted = false; // MUST be false to extract the audio natively
+                    processVid.crossOrigin = "anonymous";
+                    processVid.style.display = 'none'; // Keep it invisible
+                    processVid.muted = true; // Mute initially to bypass Autoplay blockers during load
+                    document.body.appendChild(processVid);
                     
                     // Wait for video to be ready
                     await new Promise(r => { processVid.onloadeddata = r; processVid.load(); });
@@ -520,42 +521,51 @@
                     processVid.currentTime = State.startTime;
                     await new Promise(r => { processVid.onseeked = r; });
 
-                    // 2. Setup Web Audio API to secretly extract audio without playing out loud
-                    const AudioContext = window.AudioContext || window.webkitAudioContext;
-                    audioCtx = new AudioContext();
-                    await audioCtx.resume(); // Ensure context is unlocked by the click event
+                    let audioTrack = null;
 
-                    sourceNode = audioCtx.createMediaElementSource(processVid);
-                    const audioDestination = audioCtx.createMediaStreamDestination();
-                    
-                    // Connect video audio strictly to the destination stream (Not the speakers!)
-                    sourceNode.connect(audioDestination);
-                    const audioTrack = audioDestination.stream.getAudioTracks()[0];
+                    // 2. Setup Web Audio API to route audio to the recorder (away from speakers)
+                    if (!State.muteAudio) {
+                        try {
+                            const AudioContext = window.AudioContext || window.webkitAudioContext;
+                            audioCtx = new AudioContext();
+                            await audioCtx.resume(); 
+
+                            sourceNode = audioCtx.createMediaElementSource(processVid);
+                            const audioDestination = audioCtx.createMediaStreamDestination();
+                            
+                            // Route video audio -> destination node (Not the speakers)
+                            sourceNode.connect(audioDestination);
+                            audioTrack = audioDestination.stream.getAudioTracks()[0];
+                            
+                            // NOW it is safe to unmute the video natively. It won't play out loud, 
+                            // but the browser's audio decoder will wake up and push data to the track.
+                            processVid.muted = false; 
+                        } catch (err) {
+                            console.warn("Audio extraction fallback triggered:", err);
+                        }
+                    }
 
                     // 3. Setup Canvas to capture video frames visually
                     hiddenCanvas.width = processVid.videoWidth;
                     hiddenCanvas.height = processVid.videoHeight;
                     const ctx = hiddenCanvas.getContext('2d');
-                    const canvasStream = hiddenCanvas.captureStream(30); // 30 FPS Capture
+                    const canvasStream = hiddenCanvas.captureStream(30); 
                     const videoTrack = canvasStream.getVideoTracks()[0];
 
-                    // 4. Combine Video Track and Audio Track
-                    const combinedStream = new MediaStream([videoTrack]);
-                    if (!State.muteAudio && audioTrack) {
-                        combinedStream.addTrack(audioTrack);
-                    }
+                    // 4. Combine Video Track and Audio Track safely
+                    const tracks = [videoTrack];
+                    if (audioTrack) tracks.push(audioTrack);
+                    const combinedStream = new MediaStream(tracks);
 
-                    // 5. Select Best Available Output Format
-                    let mimeType = '';
-                    if (MediaRecorder.isTypeSupported('video/mp4')) {
-                        mimeType = 'video/mp4'; // Ideal for iOS
-                    } else if (MediaRecorder.isTypeSupported('video/webm; codecs="vp8,opus"')) {
-                        mimeType = 'video/webm; codecs="vp8,opus"'; // Chrome/Android
-                    } else {
-                        mimeType = 'video/webm'; 
-                    }
+                    // 5. Select Best Available Output Format (Added fallback arrays)
+                    const mimeTypes = [
+                        'video/mp4', 
+                        'video/webm;codecs=vp8,opus', 
+                        'video/webm;codecs=vp9,opus', 
+                        'video/webm'
+                    ];
+                    const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
 
-                    // Initialize Recorder at a high bitrate (8 Mbps) for pristine quality
                     const recorder = new MediaRecorder(combinedStream, { 
                         mimeType: mimeType,
                         videoBitsPerSecond: 8000000 
@@ -565,10 +575,10 @@
                     recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
 
                     const recordingComplete = new Promise(resolve => {
-                        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType.split(';')[0] }));
+                        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType ? mimeType.split(';')[0] : 'video/mp4' }));
                     });
 
-                    // 6. Start Processing
+                    // 6. Start Processing Loop
                     recorder.start();
                     await processVid.play();
 
@@ -584,10 +594,8 @@
                                 return;
                             }
 
-                            // Copy frame from hidden video to canvas to be recorded
                             ctx.drawImage(processVid, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
                             
-                            // Update Progress UI
                             const current = processVid.currentTime - State.startTime;
                             const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
                             document.getElementById('progressFill').style.width = `${percent}%`;
@@ -615,9 +623,10 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                // Cleanup Web Audio nodes memory if they were used
+                // IMPORTANT CLEANUP to prevent memory leaks and zombie audio nodes
                 if (sourceNode) sourceNode.disconnect();
                 if (audioCtx) audioCtx.close();
+                if (processVid && processVid.parentNode) document.body.removeChild(processVid);
 
                 processBtn.disabled = false;
                 document.getElementById('btnText').innerText = "Create Live Photo";
@@ -722,7 +731,6 @@
             
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
-            // Safely map extension for native bypass files too
             let ext = "MP4";
             if (videoData.type.includes("webm")) ext = "WEBM";
             else if (videoData.type.includes("quicktime") || (videoData.name && videoData.name.toLowerCase().endsWith(".mov"))) ext = "MOV";

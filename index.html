@@ -595,26 +595,29 @@
                 
                 let args = ['-y'];
 
-                // VERY FAST SEEK: Skip decoding the start entirely
-                args.push('-ss', startStr, '-i', `input.${inputExt}`);
+                // THE FIX: -noaccurate_seek
+                // Prevents FFmpeg from creating an Edit List to "hide" the gap between the nearest 
+                // Keyframe and your exact start time. Mobile players ignore that Edit List anyway, 
+                // which is why it was flashing the old start frame!
+                args.push('-ss', startStr, '-noaccurate_seek', '-i', `input.${inputExt}`);
                 
                 if (State.muteAudio) {
                     args.push(
                         '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
                         '-map', '0:v:0', '-map', '1:a:0',
                         '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                        '-shortest' // Stops the null audio when the video is done
+                        '-shortest'
                     );
                 } else {
-                    // Copy exactly what is there without re-encoding
+                    // Copy exact streams without slow re-encoding
                     args.push('-c', 'copy');
                 }
 
-                // Apply strict fixes to repair the output container
                 args.push(
                     '-t', durationStr,
-                    '-avoid_negative_ts', 'make_zero', // Fixes off-sync keyframe starts
-                    '-fflags', '+genpts',              // Regenerates Presentation Timestamps
+                    '-avoid_negative_ts', 'make_zero',
+                    '-fflags', '+genpts',
+                    '-muxdelay', '0', // Prevents audio/video offset from creating a frozen start frame
                     '-movflags', '+faststart',
                     'output.mp4'
                 );

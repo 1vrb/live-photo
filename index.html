@@ -4,9 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Live Photo Studio Pro</title>
+    <link rel="icon" href="data:,"> <!-- Prevents Favicon 404 error -->
     
-    <!-- External Libraries: Using v0.11.6 to ensure 100% compatibility with GitHub Pages CORS -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <!-- External Libraries: Upgraded to FFmpeg v0.12.x which handles CORS via Blob URLs -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -255,17 +257,28 @@
             el.innerText = msg; el.className = `log-text ${type}`;
         }
 
-        // --- GITHUB PAGES FIX: Using FFmpeg v0.11.6 which bypasses Worker CORS issues completely ---
+        // --- GITHUB PAGES FIX: Upgraded to FFmpeg v0.12.x Core & toBlobURL functionality ---
         async function preloadFFmpeg() {
             if (ffmpegInstance || isFfmpegLoading) return;
             isFfmpegLoading = true;
             try {
-                const { createFFmpeg } = window.FFmpeg;
-                ffmpegInstance = createFFmpeg({
-                    corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-                    log: false
+                const { FFmpeg } = window.FFmpeg;
+                const { toBlobURL } = window.FFmpegUtil;
+                ffmpegInstance = new FFmpeg();
+
+                // Attach global progress listener
+                ffmpegInstance.on('progress', ({ progress }) => {
+                    const percent = Math.max(5, Math.min(90, Math.round(progress * 100)));
+                    document.getElementById('progressFill').style.width = `${percent}%`;
+                    document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
                 });
-                await ffmpegInstance.load();
+
+                // toBlobURL converts scripts to blob:// URLs to avoid strict CORS block by the browser Worker
+                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                await ffmpegInstance.load({
+                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                });
                 console.log("FFmpeg core loaded successfully.");
             } catch (err) {
                 console.error("FFmpeg preload failed:", err);
@@ -510,16 +523,10 @@
                 if (!ffmpegInstance) await preloadFFmpeg();
                 if (!ffmpegInstance) throw new Error("FFmpeg engine failed to load. Check your network.");
 
-                const { fetchFile } = window.FFmpeg;
-
-                // Listen for progress updates using the v0.11 syntax
-                ffmpegInstance.setProgress(({ ratio }) => {
-                    const percent = Math.max(5, Math.min(90, Math.round(ratio * 100)));
-                    document.getElementById('progressFill').style.width = `${percent}%`;
-                    document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
-                });
+                const { fetchFile } = window.FFmpegUtil;
                 
-                ffmpegInstance.FS('writeFile', 'input.mp4', await fetchFile(State.file));
+                // Write Input File
+                await ffmpegInstance.writeFile('input.mp4', await fetchFile(State.file));
                 
                 let args = [
                     '-ss', State.startTime.toString(), '-i', 'input.mp4', 
@@ -539,8 +546,8 @@
                     args.push('output.mp4');
                 }
 
-                // Run the FFmpeg execution
-                await ffmpegInstance.run(...args);
+                // Execute the FFmpeg arguments
+                await ffmpegInstance.exec(args);
 
                 document.getElementById('btnText').innerText = "Applying Metadata...";
                 document.getElementById('progressFill').style.width = "95%";
@@ -548,10 +555,10 @@
                 // Extract Output File
                 let finalVideoFile;
                 if (State.mode === 'ios') {
-                    const data = ffmpegInstance.FS('readFile', 'output.mov');
+                    const data = await ffmpegInstance.readFile('output.mov');
                     finalVideoFile = new Blob([data.buffer], { type: 'video/quicktime' });
                 } else {
-                    const data = ffmpegInstance.FS('readFile', 'output.mp4');
+                    const data = await ffmpegInstance.readFile('output.mp4');
                     finalVideoFile = new Blob([data.buffer], { type: 'video/mp4' });
                 }
 

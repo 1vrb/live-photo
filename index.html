@@ -480,7 +480,23 @@
                     processVid.src = State.url;
                     processVid.muted = true;
                     processVid.playsInline = true;
-                    await new Promise(r => { processVid.onloadedmetadata = r; });
+                    processVid.preload = 'metadata'; // Force mobile browsers to load metadata
+                    
+                    // Fix for Android/iOS: Attach to DOM immediately and call load()
+                    // If we don't do this, mobile browsers suspend the video and it hangs forever.
+                    processVid.style.position = 'fixed'; 
+                    processVid.style.opacity = '0'; 
+                    processVid.style.pointerEvents = 'none';
+                    document.body.appendChild(processVid);
+                    processVid.load();
+
+                    await new Promise((resolve, reject) => { 
+                        if (processVid.readyState >= 1) resolve(); // HAVE_METADATA
+                        else {
+                            processVid.onloadedmetadata = resolve;
+                            processVid.onerror = () => reject(new Error("Failed to load video metadata on this device."));
+                        }
+                    });
                     
                     const MAX_DIMENSION = 1920; 
                     let outW = processVid.videoWidth; let outH = processVid.videoHeight;
@@ -596,9 +612,7 @@
                     const frameDuration = 1 / fps; 
                     let frameCount = 0;
 
-                    // Ensure video element is physically available to canvas (fixes Safari bugs)
-                    processVid.style.position = 'fixed'; processVid.style.opacity = '0'; processVid.style.pointerEvents = 'none';
-                    document.body.appendChild(processVid);
+                    // (Video element was already attached to DOM in Step 1 to fix mobile loading bugs)
 
                     while (currentTime <= State.endTime) {
                         // Rapidly seek video (hardware decoded)

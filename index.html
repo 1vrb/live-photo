@@ -3,13 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Photo Studio Pro</title>
+    <title>Live Photo Studio Pro - FFmpeg Edition</title>
     <link rel="icon" href="data:,">
     
-    <!-- Required Libraries -->
+    <!-- Required Libraries for Metadata/Zip -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.min.js"></script>
 
     <style>
         :root {
@@ -158,7 +157,7 @@
     <div class="container">
         <div class="header-section">
             <h2>Live Photo Studio Pro</h2>
-            <p class="subtitle">Lightning WebCodecs Engine • Exact Audio Trim</p>
+            <p class="subtitle">Powered by FFmpeg.wasm Engine</p>
         </div>
 
         <div class="toggle-container">
@@ -169,7 +168,7 @@
         <label class="upload-btn" id="upload-label">
             <svg viewBox="0 0 24 24"><path d="M12 4L12 16M12 4L8 8M12 4L16 8M4 17L4 19C4 20.1046 4.89543 21 6 21L18 21C19.1046 21 20 20.1046 20 19L20 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
             Select or Drop Video
-            <input type="file" id="videoUpload" accept="video/mp4,video/quicktime,video/webm">
+            <input type="file" id="videoUpload" accept="video/*">
         </label>
 
         <div id="videoContainer" class="video-wrapper hidden">
@@ -212,7 +211,7 @@
             </div>
         </div>
 
-        <button id="processBtn" class="process-btn hidden" onclick="processVideoNative()">
+        <button id="processBtn" class="process-btn hidden" onclick="processVideoFFmpeg()">
             <div class="progress-fill" id="progressFill"></div>
             <span class="btn-text" id="btnText">Create Live Photo</span>
         </button>
@@ -222,12 +221,12 @@
 
     <script>
         const State = {
-            mode: 'android', file: null, url: null, originalDate: null, duration: 0,
+            mode: 'android', fileBuffer: null, fileType: null, url: null, originalDate: null, duration: 0,
             startTime: 0, endTime: 0, coverTime: 0, uuid: null, imageBlob: null,
             muteAudio: false, spoofDevice: 'Apple',
             reset() {
                 if (this.url) URL.revokeObjectURL(this.url);
-                this.file = null; this.url = null; this.imageBlob = null;
+                this.fileBuffer = null; this.url = null; this.imageBlob = null;
                 this.uuid = crypto.randomUUID().toUpperCase();
                 this.originalDate = new Date();
             }
@@ -236,6 +235,7 @@
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
         let isSeeking = false, pendingSeekTime = null;
+        let ffmpeg = null; // Holds the WASM engine instance
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -248,6 +248,27 @@
         const timelineWrapper = document.getElementById('timelineWrapper');
         const thumbnailsContainer = document.getElementById('thumbnails');
 
+        // ==========================================
+        // FFMPEG.WASM INITIALIZATION (Github Pages Safe)
+        // ==========================================
+        async function initFFmpeg() {
+            if (ffmpeg) return ffmpeg;
+            updateLog("Loading FFmpeg.wasm Engine...", "info");
+            const ffmpegModule = await import('https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js');
+            ffmpeg = await ffmpegModule.default({
+                locateFile: (path) => `https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/${path}`
+            });
+            return ffmpeg;
+        }
+
+        function runFFmpegSync(cmdArgs) {
+            if (typeof ffmpeg.exec === 'function') ffmpeg.exec(...cmdArgs);
+            else if (typeof ffmpeg.callMain === 'function') ffmpeg.callMain(cmdArgs);
+        }
+
+        // ==========================================
+        // UI AND FILE HANDLING
+        // ==========================================
         function setMode(mode) {
             State.mode = mode;
             document.getElementById('android-toggle').classList.toggle('active', mode === 'android');
@@ -267,12 +288,16 @@
         });
         videoUpload.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
 
-        function handleFile(file) {
+        async function handleFile(file) {
             if (!file || !file.type.startsWith('video/')) return updateLog("Please select a valid video.", "error");
             State.reset();
-            State.file = file;
+            
+            State.fileBuffer = await file.arrayBuffer();
+            State.fileType = file.type;
             State.originalDate = new Date(file.lastModified || Date.now()); 
-            State.url = URL.createObjectURL(file);
+            
+            const blob = new Blob([State.fileBuffer], { type: file.type });
+            State.url = URL.createObjectURL(blob);
             videoPreview.src = State.url;
             
             document.getElementById('videoContainer').classList.remove('hidden');
@@ -513,35 +538,38 @@
 
             while (offset < arr.length) {
                 const size = view.getUint32(offset);
+                if (size === 0 || offset + size > arr.length) break; // Safe parsing
                 const type = String.fromCharCode(arr[offset+4], arr[offset+5], arr[offset+6], arr[offset+7]);
                 if (type === 'ftyp') ftypStart = offset;
                 if (type === 'moov') { moovStart = offset; moovSize = size; break; }
                 offset += size;
             }
 
-            if (ftypStart !== -1) arr.set(new TextEncoder().encode('qt  '), ftypStart + 8); // Change to QuickTime
+            if (ftypStart !== -1) arr.set(new TextEncoder().encode('qt  '), ftypStart + 8); // Change container brand to QuickTime
 
-            // Insert UDTA to the END of the moov box (Works safely if muxer wrote moov at the end of the file)
-            const udtaBox = buildQuickTimeMetaBox(uuid);
-            const before = new Uint8Array(mp4Buffer, 0, moovStart + moovSize);
-            const after = new Uint8Array(mp4Buffer, moovStart + moovSize);
-            const newBuffer = new Uint8Array(before.length + udtaBox.length + after.length);
-            
-            newBuffer.set(before, 0);
-            newBuffer.set(udtaBox, before.length);
-            newBuffer.set(after, before.length + udtaBox.length);
-            new DataView(newBuffer.buffer).setUint32(moovStart, moovSize + udtaBox.length);
+            // Insert UDTA to the END of the moov box
+            if (moovStart !== -1) {
+                const udtaBox = buildQuickTimeMetaBox(uuid);
+                const before = new Uint8Array(mp4Buffer, 0, moovStart + moovSize);
+                const after = new Uint8Array(mp4Buffer, moovStart + moovSize);
+                const newBuffer = new Uint8Array(before.length + udtaBox.length + after.length);
+                
+                newBuffer.set(before, 0);
+                newBuffer.set(udtaBox, before.length);
+                newBuffer.set(after, before.length + udtaBox.length);
+                new DataView(newBuffer.buffer).setUint32(moovStart, moovSize + udtaBox.length);
 
-            return newBuffer;
+                return newBuffer;
+            }
+            return mp4Buffer; // Fallback if moov not found
         }
 
         // ==========================================
-        // LIGHTNING-FAST WEBCODECS ENGINE
+        // MAIN FFMPEG PROCESSING PIPELINE
         // ==========================================
-        async function processVideoNative() {
-            if (!window.VideoEncoder) return updateLog("WebCodecs unsupported. Use Chrome/Safari.", "error");
+        async function processVideoFFmpeg() {
             if (isPlaying) togglePlay();
-            if (!State.file || !State.imageBlob) {
+            if (!State.fileBuffer || !State.imageBlob) {
                 requestSeek(State.coverTime); return updateLog("Extracting cover frame...", "error");
             }
             
@@ -550,117 +578,75 @@
             updateLog("");
 
             try {
-                let finalVideoBuffer;
-                document.getElementById('btnText').innerText = "Initializing Fast Engine...";
+                // Initialize Engine
+                document.getElementById('btnText').innerText = "Loading Engine...";
+                await initFFmpeg();
 
-                let processVid = document.createElement('video');
-                processVid.src = State.url; processVid.muted = true; processVid.playsInline = true; 
-                processVid.style.position = 'fixed'; processVid.style.opacity = '0'; 
-                document.body.appendChild(processVid);
-                processVid.load();
+                // Load file into virtual memory
+                const inputExt = State.fileType.includes('quicktime') || State.fileType.includes('mov') ? 'mov' : 'mp4';
+                ffmpeg.FS.writeFile(`input.${inputExt}`, new Uint8Array(State.fileBuffer));
 
-                await new Promise((res, rej) => { 
-                    if (processVid.readyState >= 1) res(); else { processVid.onloadedmetadata = res; processVid.onerror = rej; }
-                });
+                document.getElementById('progressFill').style.width = "40%";
+                document.getElementById('btnText').innerText = "Processing Video (This takes a moment)...";
                 
-                let outW = processVid.videoWidth; let outH = processVid.videoHeight;
-                if (outW > 1920 || outH > 1920) { const r = Math.min(1920/outW, 1920/outH); outW = Math.round(outW*r); outH = Math.round(outH*r); }
-                outW -= outW % 2; outH -= outH % 2; 
+                // Allow UI to update before synchronous WASM block
+                await new Promise(r => setTimeout(r, 100)); 
 
-                hiddenCanvas.width = outW; hiddenCanvas.height = outH;
-                const ctx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+                let args = ['-y', '-err_detect', 'ignore_err'];
+                
+                // Trimming parameters
+                args.push('-ss', State.startTime.toString(), '-t', (State.endTime - State.startTime).toString());
 
-                const AUDIO_SR = 44100;
-                let audioDataToEncode = null; let extractedChannels = 2;
+                // Audio Generation (Solves the Android silent video parsing bug)
+                if (State.muteAudio) {
+                    // Generate an empty audio stream to force the muxer to create a silent audio track
+                    args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
+                }
+                
+                args.push('-i', `input.${inputExt}`);
 
-                if (!State.muteAudio) {
-                    document.getElementById('btnText').innerText = "Processing Audio...";
-                    try {
-                        const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-                        const audioCtx = new OfflineCtx(2, AUDIO_SR, AUDIO_SR); 
-                        const fileBuffer = await State.file.arrayBuffer();
-                        const decodedBuffer = await new Promise((res, rej) => audioCtx.decodeAudioData(fileBuffer, res, rej));
-                        
-                        const trimDuration = State.endTime - State.startTime;
-                        const renderCtx = new OfflineCtx(2, Math.ceil(AUDIO_SR * trimDuration), AUDIO_SR);
-                        const source = renderCtx.createBufferSource();
-                        source.buffer = decodedBuffer; source.connect(renderCtx.destination);
-                        source.start(0, State.startTime, trimDuration);
-                        
-                        audioDataToEncode = await renderCtx.startRendering();
-                        extractedChannels = audioDataToEncode.numberOfChannels;
-                    } catch(e) { console.warn("No audio track detected."); }
+                // Video settings: Force H.264, standard pixel format, fast encoding
+                args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p');
+
+                if (State.muteAudio) {
+                    // Map generated silent audio to output
+                    args.push('-map', '1:v:0', '-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k', '-shortest');
+                } else {
+                    // Keep original audio but ensure it is AAC format for cross-platform compatibility
+                    args.push('-c:a', 'aac', '-b:a', '128k');
                 }
 
-                // IMPORTANT: Do NOT use fastStart for iOS processing, so moov is safely written at the end
-                let muxer = new Mp4Muxer.Muxer({
-                    target: new Mp4Muxer.ArrayBufferTarget(),
-                    video: { codec: 'avc', width: outW, height: outH },
-                    audio: { codec: 'aac', numberOfChannels: audioDataToEncode ? extractedChannels : 2, sampleRate: AUDIO_SR }
-                });
+                args.push('output.mp4');
 
-                const audioEncoder = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: console.warn });
-                audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: AUDIO_SR, numberOfChannels: audioDataToEncode ? extractedChannels : 2, bitrate: 128000 });
+                // Execute FFmpeg
+                runFFmpegSync(args);
 
-                // Fill Audio: Either real extracted audio, or explicit SILENCE (fixes Android parsing errors)
-                const totalAudioFrames = Math.ceil(AUDIO_SR * (State.endTime - State.startTime));
-                const frameSize = 1024;
-                for (let i = 0; i < totalAudioFrames; i += frameSize) {
-                    const size = Math.min(frameSize, totalAudioFrames - i);
-                    const planarData = new Float32Array((audioDataToEncode ? extractedChannels : 2) * size);
-                    if (audioDataToEncode) {
-                        for (let c = 0; c < extractedChannels; c++) planarData.set(audioDataToEncode.getChannelData(c).subarray(i, i + size), c * size);
-                    } // else it remains full of zeros (silence)
-                    const ad = new AudioData({ format: 'f32-planar', sampleRate: AUDIO_SR, numberOfFrames: size, numberOfChannels: audioDataToEncode ? extractedChannels : 2, timestamp: (i / AUDIO_SR) * 1e6, data: planarData });
-                    audioEncoder.encode(ad); ad.close();
-                }
-                await audioEncoder.flush(); audioEncoder.close();
-
-                document.getElementById('btnText').innerText = "Fast Rendering Video...";
-                const videoEncoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: console.error });
-                videoEncoder.configure({ codec: 'avc1.4d002a', width: outW, height: outH, hardwareAcceleration: 'prefer-hardware', bitrate: (outW * outH) > 2000000 ? 8000000 : 5000000 });
-
-                let frameCount = 0; let lastMediaTime = -1;
-                await new Promise((resolve) => {
-                    const captureFrame = (now, metadata) => {
-                        const currentMediaTime = metadata ? metadata.mediaTime : processVid.currentTime;
-                        if (currentMediaTime >= State.endTime) { processVid.pause(); resolve(); return; }
-                        
-                        if (currentMediaTime !== lastMediaTime) {
-                            lastMediaTime = currentMediaTime;
-                            ctx.drawImage(processVid, 0, 0, outW, outH);
-                            const frame = new VideoFrame(hiddenCanvas, { timestamp: Math.max(0, (currentMediaTime - State.startTime)) * 1e6 });
-                            videoEncoder.encode(frame, { keyFrame: frameCount === 0 });
-                            frame.close(); frameCount++;
-                            
-                            if (frameCount % 4 === 0) {
-                                const p = Math.min(95, 5 + Math.round(((currentMediaTime - State.startTime) / (State.endTime - State.startTime)) * 90));
-                                document.getElementById('progressFill').style.width = `${p}%`; document.getElementById('btnText').innerText = `Encoding Native... ${p}%`;
-                            }
-                        }
-                        if ('requestVideoFrameCallback' in processVid) processVid.requestVideoFrameCallback(captureFrame); else requestAnimationFrame(captureFrame);
-                    };
-
-                    processVid.currentTime = State.startTime;
-                    processVid.playbackRate = 2.5; // High-speed linear playback fixes mobile seek lag
-                    processVid.play().then(() => {
-                        if ('requestVideoFrameCallback' in processVid) processVid.requestVideoFrameCallback(captureFrame); else requestAnimationFrame(captureFrame);
-                    });
-                });
-
-                await videoEncoder.flush(); videoEncoder.close(); muxer.finalize();
-                document.body.removeChild(processVid);
-
-                finalVideoBuffer = muxer.target.buffer;
-
-                if (State.mode === 'ios') finalVideoBuffer = injectAppleVideoMetadata(finalVideoBuffer, State.uuid);
-
+                document.getElementById('progressFill').style.width = "90%";
                 document.getElementById('btnText').innerText = "Applying Metadata...";
+
+                // Extract final buffer
+                let finalVideoBuffer = ffmpeg.FS.readFile('output.mp4').buffer;
+                
+                // Cleanup virtual filesystem
+                try {
+                    ffmpeg.FS.unlink(`input.${inputExt}`);
+                    ffmpeg.FS.unlink('output.mp4');
+                } catch(e) {}
+
+                // Inject Apple Binary Identifiers
+                if (State.mode === 'ios') {
+                    finalVideoBuffer = injectAppleVideoMetadata(finalVideoBuffer, State.uuid);
+                }
+
                 document.getElementById('progressFill').style.width = "95%";
 
+                // Image processing and Bundle creation
                 const imageBytes = await applyEXIFData();
-                if (State.mode === 'android') await createAndroidUniversal(finalVideoBuffer, imageBytes);
-                else await createIOSBundle(finalVideoBuffer, imageBytes);
+                if (State.mode === 'android') {
+                    await createAndroidUniversal(finalVideoBuffer, imageBytes);
+                } else {
+                    await createIOSBundle(finalVideoBuffer, imageBytes);
+                }
                 
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");

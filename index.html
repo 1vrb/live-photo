@@ -4,16 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Live Photo Studio Pro</title>
-    <link rel="icon" href="data:,"> <!-- Prevents Favicon 404 error -->
+    <link rel="icon" href="data:,">
     
-    <!-- External Libraries: v0.12.x specifically fixes SharedArrayBuffer & CORS on GitHub Pages -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+    <!-- We only keep standard libraries here. FFmpeg is loaded dynamically via ES Modules below! -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
     <style>
-        /* Base Reset & Professional Styling */
         :root {
             --bg-color: #000000; --card-bg: #1C1C1E; --panel-bg: #2C2C2E; --hover-bg: #3A3A3C;
             --accent-ios: #0A84FF; --accent-android: #30D158; --accent-yellow: #FFD60A;
@@ -220,6 +217,13 @@
     </div>
 
     <script>
+        // Store FFmpeg dynamically loaded modules here so they don't rely on the window object
+        let FFmpegClass = null;
+        let fetchFileFn = null;
+        let toBlobURLFn = null;
+        let ffmpegInstance = null;
+        let isFfmpegLoading = false;
+
         const State = {
             mode: 'android', file: null, url: null, originalDate: null, duration: 0,
             startTime: 0, endTime: 0, coverTime: 0, uuid: null, imageBlob: null,
@@ -234,7 +238,6 @@
 
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
-        let ffmpegInstance = null, isFfmpegLoading = false;
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -257,21 +260,21 @@
             el.innerText = msg; el.className = `log-text ${type}`;
         }
 
-        // --- GITHUB PAGES FIX: FFmpegWASM is the correct global object for v0.12 ---
+        // --- GITHUB PAGES FIX: Dynamic ES Modules ---
+        // This imports the JS securely and guarantees the library works without relying on global variables.
         async function preloadFFmpeg() {
             if (ffmpegInstance || isFfmpegLoading) return;
             isFfmpegLoading = true;
             try {
-                // Ensure the global objects loaded
-                if (!window.FFmpegWASM || !window.FFmpegUtil) {
-                    throw new Error("FFmpeg libraries didn't load properly. Please refresh the page.");
-                }
-
-                // Destructure from correct v0.12 global objects
-                const { FFmpeg } = window.FFmpegWASM;
-                const { toBlobURL } = window.FFmpegUtil;
+                // Dynamically import the ES Modules natively.
+                const ffmpegPkg = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+                const utilPkg = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
                 
-                ffmpegInstance = new FFmpeg();
+                FFmpegClass = ffmpegPkg.FFmpeg;
+                fetchFileFn = utilPkg.fetchFile;
+                toBlobURLFn = utilPkg.toBlobURL;
+                
+                ffmpegInstance = new FFmpegClass();
 
                 // Attach global progress listener
                 ffmpegInstance.on('progress', ({ progress }) => {
@@ -280,17 +283,18 @@
                     document.getElementById('btnText').innerText = `Encoding Engine... ${percent}%`;
                 });
 
-                // toBlobURL converts scripts to blob:// URLs to avoid strict CORS block by GitHub Pages
-                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                // toBlobURL converts scripts to blob:// URLs to bypass CORS entirely
+                const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
                 await ffmpegInstance.load({
-                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                    coreURL: await toBlobURLFn(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURLFn(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
                 });
                 
-                console.log("FFmpeg core loaded successfully.");
+                console.log("FFmpeg Core Loaded via ES Modules successfully.");
             } catch (err) {
                 console.error("FFmpeg preload failed:", err);
                 ffmpegInstance = null;
+                updateLog("Network error: Could not load FFmpeg engine.", "error");
             } finally { 
                 isFfmpegLoading = false; 
             }
@@ -529,13 +533,10 @@
             
             try {
                 if (!ffmpegInstance) await preloadFFmpeg();
-                if (!ffmpegInstance) throw new Error("FFmpeg engine failed to load. Please HARD REFRESH your browser.");
-
-                // Destructure fetchFile from correct v0.12 utility object
-                const { fetchFile } = window.FFmpegUtil;
+                if (!ffmpegInstance || !fetchFileFn) throw new Error("FFmpeg engine failed to load. Check your network.");
                 
-                // Write Input File
-                await ffmpegInstance.writeFile('input.mp4', await fetchFile(State.file));
+                // Write Input File securely using the dynamic utility
+                await ffmpegInstance.writeFile('input.mp4', await fetchFileFn(State.file));
                 
                 let args = [
                     '-ss', State.startTime.toString(), '-i', 'input.mp4', 
@@ -627,7 +628,7 @@
             const videoLength = videoArrayBuffer.byteLength;
             const presentationTimeUs = Math.max(0, Math.round((State.coverTime - State.startTime) * 1000000));
 
-            const xmpData = `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            const xmpData = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0-jc003">
   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
     <rdf:Description rdf:about=""

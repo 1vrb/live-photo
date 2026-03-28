@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- Fixed Viewport: Removed user-scalable=no to allow pinch-to-zoom -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
     
@@ -148,7 +149,7 @@
         }
         .btn-text { position: relative; z-index: 2; }
 
-        .log-text { text-align: center; font-size: 13px; color: var(--text-muted); height: 20px; font-weight: 500; }
+        .log-text { text-align: center; font-size: 13px; color: var(--text-muted); min-height: 20px; font-weight: 500; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
         .log-text.error { color: #FF453A; }
     </style>
 </head>
@@ -258,7 +259,7 @@
 
         function updateLog(msg, type = "info") { 
             const el = document.getElementById('logText');
-            el.innerText = msg; el.className = `log-text ${type}`;
+            el.innerHTML = msg; el.className = `log-text ${type}`;
         }
 
         uploadLabel.addEventListener('dragover', e => { e.preventDefault(); uploadLabel.classList.add('dragover'); });
@@ -294,7 +295,6 @@
             };
         }
 
-        // Completely rewritten robust thumbnail generator for mobile support
         async function generateThumbnails() {
             const genId = ++filmstripGenerationId; 
             const containerWidth = timeline.offsetWidth;
@@ -318,7 +318,6 @@
 
             const step = State.duration / numThumbs;
             const c = document.createElement('canvas');
-            // Downscale heavily to save memory on mobile devices
             c.width = hiddenVid.videoWidth / 5; 
             c.height = hiddenVid.videoHeight / 5;
             const ctx = c.getContext('2d');
@@ -330,7 +329,7 @@
                 await new Promise(r => { 
                     const finish = () => { hiddenVid.removeEventListener('seeked', finish); r(); };
                     hiddenVid.addEventListener('seeked', finish);
-                    setTimeout(finish, 400); // Safety timeout for bad decoders
+                    setTimeout(finish, 400); 
                 });
                 
                 if (filmstripGenerationId !== genId) break;
@@ -339,7 +338,7 @@
                 
                 const img = document.createElement('img');
                 img.src = c.toDataURL('image/jpeg', 0.5);
-                img.onload = () => img.style.opacity = '1'; // Fade in effect
+                img.onload = () => img.style.opacity = '1'; 
                 thumbnailsContainer.appendChild(img);
             }
             
@@ -417,7 +416,6 @@
             updateUI();
         }
 
-        // THROTLED SEEKING: Prevents mobile decoders from freezing on scrub
         function requestSeek(time) {
             if (!isSeeking) {
                 isSeeking = true;
@@ -434,7 +432,6 @@
                 pendingSeekTime = null;
                 requestSeek(t);
             } else if (!isDragging && !isPlaying && Math.abs(videoPreview.currentTime - State.coverTime) < 0.1) {
-                // Update Cover image strictly when decoder is fully settled
                 hiddenCanvas.width = videoPreview.videoWidth; hiddenCanvas.height = videoPreview.videoHeight;
                 hiddenCanvas.getContext('2d').drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
                 hiddenCanvas.toBlob(blob => { State.imageBlob = blob; }, 'image/jpeg', 0.95);
@@ -456,7 +453,7 @@
         }
 
         // ==========================================
-        // FIXED SMART ENGINE: Immediate Audio Unlocker
+        // FIXED SMART ENGINE: Perfect Audio Extraction
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
@@ -467,84 +464,91 @@
             
             processBtn.disabled = true;
             document.getElementById('progressFill').style.width = "5%";
-            
-            // --- CRITICAL AUDIO FIX ---
-            // Audio context MUST be created and resumed synchronously on the click event. 
-            // If it is inside an await block, iOS Safari permanently disables audio rendering.
-            let audioCtx = null;
-            let audioDest = null;
+            updateLog("");
             
             const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
             const needsReencoding = isTrimmed || State.muteAudio;
 
-            if (needsReencoding && !State.muteAudio) {
-                try {
-                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                    if (AudioContextClass) {
-                        audioCtx = new AudioContextClass();
-                        audioCtx.resume();
-                        audioDest = audioCtx.createMediaStreamDestination();
-                    }
-                } catch (e) { console.warn("Audio Context Init Failed:", e); }
-            }
-
-            let sourceNode = null;
+            let audioCtx = null;
+            let audioSource = null;
             let processVid = null; 
 
             try {
                 let finalVideoFile;
 
                 if (!needsReencoding) {
-                    // Bypass rendering completely! Pass the original file directly into the bundler
+                    // Bypass rendering completely! Pass the original file perfectly intact
                     document.getElementById('btnText').innerText = "Using Original Video...";
                     document.getElementById('progressFill').style.width = "50%";
                     finalVideoFile = State.file;
                     await new Promise(r => setTimeout(r, 600)); 
                 } else {
-                    document.getElementById('btnText').innerText = "Recording Output...";
+                    document.getElementById('btnText').innerText = "Processing Audio...";
                     
-                    // 1. Create a hidden video element and ATTACH it to the DOM. 
-                    processVid = document.createElement('video');
-                    processVid.src = State.url;
-                    processVid.playsInline = true;
-                    processVid.crossOrigin = "anonymous";
-                    processVid.style.display = 'none'; 
-                    processVid.muted = true; // Mute initially to bypass Autoplay blockers
-                    document.body.appendChild(processVid);
-                    
-                    // Wait for video to be ready
-                    await new Promise(r => { processVid.onloadeddata = r; processVid.load(); });
-                    
-                    processVid.currentTime = State.startTime;
-                    await new Promise(r => { processVid.onseeked = r; });
-
                     let audioTrack = null;
-
-                    // 2. Safely route Audio away from speakers into the recorder
-                    if (audioCtx && audioDest) {
+                    
+                    // 1. Fully Extract Original Audio buffer (Bypasses iOS strict Autoplay issues entirely)
+                    if (!State.muteAudio) {
                         try {
-                            sourceNode = audioCtx.createMediaElementSource(processVid);
-                            sourceNode.connect(audioDest);
-                            audioTrack = audioDest.stream.getAudioTracks()[0];
-                            processVid.muted = false; // Safe to unmute now, it is isolated!
+                            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                            if (AudioContextClass) {
+                                audioCtx = new AudioContextClass();
+                                const arrayBuffer = await State.file.arrayBuffer();
+                                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                                
+                                const audioDest = audioCtx.createMediaStreamDestination();
+                                audioTrack = audioDest.stream.getAudioTracks()[0];
+                                
+                                audioSource = audioCtx.createBufferSource();
+                                audioSource.buffer = audioBuffer;
+                                audioSource.connect(audioDest);
+                            }
                         } catch (err) {
-                            console.warn("Audio routing failed:", err);
+                            console.warn("Audio extraction failed or format not supported:", err);
                         }
                     }
 
-                    // 3. Setup Canvas to capture video frames visually
-                    hiddenCanvas.width = processVid.videoWidth;
-                    hiddenCanvas.height = processVid.videoHeight;
+                    // 2. Setup hidden visual video element (MUTED to guarantee play on Safari)
+                    processVid = document.createElement('video');
+                    processVid.src = State.url;
+                    processVid.playsInline = true;
+                    processVid.muted = true; 
+                    processVid.style.display = 'none'; 
+                    document.body.appendChild(processVid);
+                    
+                    await new Promise(r => { 
+                        if (processVid.readyState >= 2) r(); 
+                        else processVid.addEventListener('loadeddata', r, { once: true }); 
+                    });
+                    
+                    processVid.currentTime = State.startTime;
+                    await new Promise(r => { 
+                        const finish = () => { processVid.removeEventListener('seeked', finish); r(); };
+                        processVid.addEventListener('seeked', finish);
+                    });
+
+                    // 3. Setup Canvas, scale down slightly for mobile memory safety
+                    const MAX_DIMENSION = 1920; // Caps 4k video at 1080p equivalent to prevent out-of-memory crashes
+                    let outWidth = processVid.videoWidth;
+                    let outHeight = processVid.videoHeight;
+                    if (outWidth > MAX_DIMENSION || outHeight > MAX_DIMENSION) {
+                        const ratio = Math.min(MAX_DIMENSION / outWidth, MAX_DIMENSION / outHeight);
+                        outWidth = Math.round(outWidth * ratio); outHeight = Math.round(outHeight * ratio);
+                    }
+                    // Prevent odd resolutions which breaks some native web encoders
+                    outWidth -= outWidth % 2; outHeight -= outHeight % 2;
+
+                    hiddenCanvas.width = outWidth;
+                    hiddenCanvas.height = outHeight;
                     const ctx = hiddenCanvas.getContext('2d');
                     const canvasStream = hiddenCanvas.captureStream(30); 
                     const videoTrack = canvasStream.getVideoTracks()[0];
 
-                    // 4. Combine Video Track and Audio Track safely
+                    // 4. Combine Video and Extracted Audio
                     const tracks = [videoTrack];
                     if (audioTrack) tracks.push(audioTrack);
                     const combinedStream = new MediaStream(tracks);
 
-                    // 5. Select Best Available Output Format
                     const mimeTypes = [
                         'video/mp4', 
                         'video/webm;codecs=vp8,opus', 
@@ -552,9 +556,11 @@
                     ];
                     const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
 
+                    const bps = (outWidth * outHeight) > 2000000 ? 8000000 : 5000000;
+
                     const recorder = new MediaRecorder(combinedStream, { 
                         mimeType: mimeType,
-                        videoBitsPerSecond: 6000000 
+                        videoBitsPerSecond: bps 
                     });
                     
                     const chunks = [];
@@ -564,9 +570,14 @@
                         recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType ? mimeType.split(';')[0] : 'video/mp4' }));
                     });
 
-                    // 6. Start Processing Loop
+                    // 5. Run Synchronized Engine Frame generation
                     recorder.start();
-                    await processVid.play();
+                    processVid.play();
+                    
+                    // Sync Audio playback timeline directly from the precise cutpoint
+                    if (audioSource) {
+                        audioSource.start(0, State.startTime);
+                    }
 
                     const duration = State.endTime - State.startTime;
 
@@ -579,7 +590,7 @@
                                 return;
                             }
 
-                            ctx.drawImage(processVid, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                            ctx.drawImage(processVid, 0, 0, outWidth, outHeight);
                             
                             const current = processVid.currentTime - State.startTime;
                             const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
@@ -604,12 +615,10 @@
                     await createIOSBundle(finalVideoFile, imageBytes);
                 }
                 
-                updateLog("✅ Live Photo Created Successfully!");
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                // CLEANUP: Prevent memory leaks and zombie audio nodes
-                if (sourceNode) sourceNode.disconnect();
+                if (audioSource) audioSource.stop();
                 if (audioCtx) audioCtx.close();
                 if (processVid && processVid.parentNode) document.body.removeChild(processVid);
 
@@ -709,11 +718,11 @@
             finalBuffer.set(new Uint8Array(videoArrayBuffer), insertPos + app1Segment.length + (imageBytes.length - insertPos));
 
             triggerDownload(new Blob([finalBuffer], { type: 'image/jpeg' }), `MotionPhoto_${Date.now()}.jpg`);
+            updateLog("✅ Live Photo Created Successfully!");
         }
 
         async function createIOSBundle(videoData, imageBytes) {
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
-            
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
             let ext = "MP4";
@@ -721,23 +730,59 @@
             else if (videoData.type.includes("quicktime") || (videoData.name && videoData.name.toLowerCase().endsWith(".mov"))) ext = "MOV";
             
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
-            const movFile = new File([videoData], `${baseName}.${ext}`, { type: videoData.type });
+            const movFile = new File([videoData], `${baseName}.${ext}`, { type: videoData.type || "video/mp4" });
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
-                try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); } 
-                catch (err) { fallbackZipDownload(jpgFile, movFile); }
-            } else fallbackZipDownload(jpgFile, movFile);
+                try { 
+                    await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); 
+                    updateLog("✅ Live Photo Shared! Save to Photos.");
+                    return; // Avoid triggering blockable downloads
+                } catch (err) { 
+                    if (err.name === 'AbortError' || (err.message && err.message.toLowerCase().includes('cancel'))) {
+                        updateLog("Share sheet cancelled.");
+                        return;
+                    }
+                    console.warn("Share failed, falling back to Zip", err);
+                    fallbackZipDownload(jpgFile, movFile); 
+                }
+            } else {
+                fallbackZipDownload(jpgFile, movFile);
+            }
         }
 
         async function fallbackZipDownload(jpg, mov) {
-            updateLog("Bundling format...");
+            updateLog("Bundling formats...");
             try {
-                const zip = new JSZip(); zip.file(jpg.name, jpg); zip.file(mov.name, mov);
-                const content = await zip.generateAsync({ type: "blob" });
+                const zip = new JSZip(); 
+                // Using exact array buffer to avoid Blob reference breakage
+                zip.file(jpg.name, await jpg.arrayBuffer()); 
+                zip.file(mov.name, await mov.arrayBuffer());
+                
+                // Changed from deflating to strictly 'STORE'. Fixes huge mobile memory crash that breaks ZIP execution
+                const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
                 triggerDownload(content, "LivePhoto_Bundle.zip");
                 updateLog("✅ Zip saved. Airdrop to iPhone or extract to Photos.");
             } catch (err) {
-                triggerDownload(jpg, jpg.name); setTimeout(() => triggerDownload(mov, mov.name), 500);
+                console.error("ZIP engine failed", err);
+                
+                // Bulletproof popup-blocker workaround (Render literal large buttons into the DOM):
+                updateLog("Zip creation failed. Click to save files directly:", "error");
+                
+                const logEl = document.getElementById('logText');
+                logEl.innerHTML = "";
+                
+                const btn1 = document.createElement('button');
+                btn1.innerText = "💾 Save Photo";
+                btn1.style.cssText = "padding: 8px 16px; border-radius: 8px; border: none; background: #0A84FF; color: white; font-weight: bold; cursor: pointer;";
+                btn1.onclick = () => triggerDownload(jpg, jpg.name);
+                
+                const btn2 = document.createElement('button');
+                btn2.innerText = "🎥 Save Video";
+                btn2.style.cssText = btn1.style.cssText;
+                btn2.onclick = () => triggerDownload(mov, mov.name);
+                
+                logEl.appendChild(btn1);
+                logEl.appendChild(btn2);
             }
         }
 

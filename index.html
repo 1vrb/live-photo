@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <!-- Fixed Viewport: Removed user-scalable=no to allow pinch-to-zoom -->
+    <!-- Viewport updated: Removed user-scalable=no to allow pinch-to-zoom -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
@@ -92,7 +92,6 @@
         }
         .editor-header { display: flex; justify-content: space-between; font-size: 13px; color: #E5E5EA; font-weight: 600; }
         .editor-header span span { color: var(--text-muted); font-weight: 500; margin-left: 4px; }
-        .hint-text { text-align: center; font-size: 11px; color: #636366; margin-top: 2px; }
 
         .timeline-wrapper {
             position: relative; width: 100%; padding: 12px 0; overflow-x: auto; overflow-y: hidden; 
@@ -149,7 +148,7 @@
         }
         .btn-text { position: relative; z-index: 2; }
 
-        .log-text { text-align: center; font-size: 13px; color: var(--text-muted); min-height: 20px; font-weight: 500; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+        .log-text { text-align: center; font-size: 13px; color: var(--text-muted); min-height: 20px; font-weight: 500; margin-top: 4px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
         .log-text.error { color: #FF453A; }
     </style>
 </head>
@@ -235,10 +234,7 @@
 
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
-        
-        // Throttling State to prevent mobile preview lagging
-        let isSeeking = false;
-        let pendingSeekTime = null;
+        let isSeeking = false, pendingSeekTime = null;
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -303,10 +299,8 @@
             thumbnailsContainer.innerHTML = '';
             
             const hiddenVid = document.createElement('video');
-            hiddenVid.muted = true; 
-            hiddenVid.playsInline = true; 
-            hiddenVid.src = State.url;
-            hiddenVid.style.display = 'none';
+            hiddenVid.muted = true; hiddenVid.playsInline = true; 
+            hiddenVid.src = State.url; hiddenVid.style.display = 'none';
             document.body.appendChild(hiddenVid);
             
             await new Promise(r => {
@@ -318,8 +312,7 @@
 
             const step = State.duration / numThumbs;
             const c = document.createElement('canvas');
-            c.width = hiddenVid.videoWidth / 5; 
-            c.height = hiddenVid.videoHeight / 5;
+            c.width = hiddenVid.videoWidth / 5; c.height = hiddenVid.videoHeight / 5;
             const ctx = c.getContext('2d');
             
             for (let i = 0; i < numThumbs; i++) {
@@ -335,7 +328,6 @@
                 if (filmstripGenerationId !== genId) break;
 
                 ctx.drawImage(hiddenVid, 0, 0, c.width, c.height);
-                
                 const img = document.createElement('img');
                 img.src = c.toDataURL('image/jpeg', 0.5);
                 img.onload = () => img.style.opacity = '1'; 
@@ -428,9 +420,7 @@
         videoPreview.addEventListener('seeked', () => {
             isSeeking = false;
             if (pendingSeekTime !== null) {
-                const t = pendingSeekTime;
-                pendingSeekTime = null;
-                requestSeek(t);
+                const t = pendingSeekTime; pendingSeekTime = null; requestSeek(t);
             } else if (!isDragging && !isPlaying && Math.abs(videoPreview.currentTime - State.coverTime) < 0.1) {
                 hiddenCanvas.width = videoPreview.videoWidth; hiddenCanvas.height = videoPreview.videoHeight;
                 hiddenCanvas.getContext('2d').drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
@@ -453,7 +443,7 @@
         }
 
         // ==========================================
-        // FIXED SMART ENGINE: Perfect Audio Extraction
+        // PRO AUDIO ENGINE: Synchronous Unlock + WebKit Fix
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
@@ -470,6 +460,27 @@
             const needsReencoding = isTrimmed || State.muteAudio;
 
             let audioCtx = null;
+            let audioDest = null;
+            let dummyGain = null;
+
+            // 1. MUST SYNCHRONOUSLY UNLOCK AUDIO CONTEXT ON CLICK (Bypasses iOS strict rules)
+            if (needsReencoding && !State.muteAudio) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (AudioContextClass) {
+                    try {
+                        audioCtx = new AudioContextClass();
+                        audioCtx.resume(); // <--- CRITICAL FIX 1: Resume from Suspended state
+                        
+                        audioDest = audioCtx.createMediaStreamDestination();
+                        
+                        // CRITICAL FIX 2: Prevent Safari from silencing the node to "save battery"
+                        dummyGain = audioCtx.createGain();
+                        dummyGain.gain.value = 0.001; 
+                        dummyGain.connect(audioCtx.destination);
+                    } catch (e) { console.error("Audio Context Init Failed", e); }
+                }
+            }
+
             let audioSource = null;
             let processVid = null; 
 
@@ -477,41 +488,41 @@
                 let finalVideoFile;
 
                 if (!needsReencoding) {
-                    // Bypass rendering completely! Pass the original file perfectly intact
+                    // Bypass renderer, user wants untouched original format
                     document.getElementById('btnText').innerText = "Using Original Video...";
                     document.getElementById('progressFill').style.width = "50%";
                     finalVideoFile = State.file;
                     await new Promise(r => setTimeout(r, 600)); 
                 } else {
                     document.getElementById('btnText').innerText = "Processing Audio...";
-                    
                     let audioTrack = null;
                     
-                    // 1. Fully Extract Original Audio buffer (Bypasses iOS strict Autoplay issues entirely)
-                    if (!State.muteAudio) {
+                    // 2. Decode raw audio securely using the unlocked context
+                    if (audioCtx) {
                         try {
-                            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                            if (AudioContextClass) {
-                                audioCtx = new AudioContextClass();
-                                const arrayBuffer = await State.file.arrayBuffer();
-                                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-                                
-                                const audioDest = audioCtx.createMediaStreamDestination();
-                                audioTrack = audioDest.stream.getAudioTracks()[0];
-                                
-                                audioSource = audioCtx.createBufferSource();
-                                audioSource.buffer = audioBuffer;
-                                audioSource.connect(audioDest);
-                            }
+                            const arrayBuffer = await State.file.arrayBuffer();
+                            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                            
+                            audioSource = audioCtx.createBufferSource();
+                            audioSource.buffer = audioBuffer;
+                            
+                            // Branch 1: Connect to recorder stream
+                            audioSource.connect(audioDest);
+                            // Branch 2: Connect to Dummy Gain (keeps node alive in WebKit)
+                            audioSource.connect(dummyGain);
+                            
+                            audioTrack = audioDest.stream.getAudioTracks()[0];
                         } catch (err) {
-                            console.warn("Audio extraction failed or format not supported:", err);
+                            console.warn("Audio extraction failed:", err);
                         }
                     }
 
-                    // 2. Setup hidden visual video element (MUTED to guarantee play on Safari)
+                    // 3. Setup invisible video element
                     processVid = document.createElement('video');
                     processVid.src = State.url;
                     processVid.playsInline = true;
+                    // CRITICAL: MUST REMAIN MUTED SO SAFARI ALLOWS IT TO AUTOPLAY. 
+                    // Since audio is handled perfectly by AudioContext above, video can safely stay muted!
                     processVid.muted = true; 
                     processVid.style.display = 'none'; 
                     document.body.appendChild(processVid);
@@ -522,62 +533,44 @@
                     });
                     
                     processVid.currentTime = State.startTime;
-                    await new Promise(r => { 
-                        const finish = () => { processVid.removeEventListener('seeked', finish); r(); };
-                        processVid.addEventListener('seeked', finish);
-                    });
+                    await new Promise(r => { processVid.addEventListener('seeked', r, { once: true }); });
 
-                    // 3. Setup Canvas, scale down slightly for mobile memory safety
-                    const MAX_DIMENSION = 1920; // Caps 4k video at 1080p equivalent to prevent out-of-memory crashes
-                    let outWidth = processVid.videoWidth;
-                    let outHeight = processVid.videoHeight;
-                    if (outWidth > MAX_DIMENSION || outHeight > MAX_DIMENSION) {
-                        const ratio = Math.min(MAX_DIMENSION / outWidth, MAX_DIMENSION / outHeight);
-                        outWidth = Math.round(outWidth * ratio); outHeight = Math.round(outHeight * ratio);
+                    // Downscale 4K to 1080p if needed to protect Mobile RAM
+                    const MAX_DIMENSION = 1920; 
+                    let outW = processVid.videoWidth; let outH = processVid.videoHeight;
+                    if (outW > MAX_DIMENSION || outH > MAX_DIMENSION) {
+                        const ratio = Math.min(MAX_DIMENSION / outW, MAX_DIMENSION / outH);
+                        outW = Math.round(outW * ratio); outH = Math.round(outH * ratio);
                     }
-                    // Prevent odd resolutions which breaks some native web encoders
-                    outWidth -= outWidth % 2; outHeight -= outHeight % 2;
+                    outW -= outW % 2; outH -= outH % 2; // Prevent encoder crash on odd pixel counts
 
-                    hiddenCanvas.width = outWidth;
-                    hiddenCanvas.height = outHeight;
+                    hiddenCanvas.width = outW; hiddenCanvas.height = outH;
                     const ctx = hiddenCanvas.getContext('2d');
                     const canvasStream = hiddenCanvas.captureStream(30); 
                     const videoTrack = canvasStream.getVideoTracks()[0];
 
-                    // 4. Combine Video and Extracted Audio
                     const tracks = [videoTrack];
                     if (audioTrack) tracks.push(audioTrack);
                     const combinedStream = new MediaStream(tracks);
 
-                    const mimeTypes = [
-                        'video/mp4', 
-                        'video/webm;codecs=vp8,opus', 
-                        'video/webm'
-                    ];
+                    const mimeTypes = [ 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm' ];
                     const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
+                    const bps = (outW * outH) > 2000000 ? 8000000 : 5000000;
 
-                    const bps = (outWidth * outHeight) > 2000000 ? 8000000 : 5000000;
-
-                    const recorder = new MediaRecorder(combinedStream, { 
-                        mimeType: mimeType,
-                        videoBitsPerSecond: bps 
-                    });
-                    
+                    const recorder = new MediaRecorder(combinedStream, { mimeType: mimeType, videoBitsPerSecond: bps });
                     const chunks = [];
                     recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-
                     const recordingComplete = new Promise(resolve => {
                         recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType ? mimeType.split(';')[0] : 'video/mp4' }));
                     });
 
-                    // 5. Run Synchronized Engine Frame generation
+                    // 4. Run Recorder and Engine Loop
                     recorder.start();
-                    processVid.play();
                     
-                    // Sync Audio playback timeline directly from the precise cutpoint
-                    if (audioSource) {
-                        audioSource.start(0, State.startTime);
-                    }
+                    // Fire audio EXACTLY synchronized to the trim cutpoint
+                    if (audioSource) { audioSource.start(0, State.startTime); }
+                    
+                    await processVid.play(); 
 
                     const duration = State.endTime - State.startTime;
 
@@ -590,12 +583,12 @@
                                 return;
                             }
 
-                            ctx.drawImage(processVid, 0, 0, outWidth, outHeight);
+                            ctx.drawImage(processVid, 0, 0, outW, outH);
                             
                             const current = processVid.currentTime - State.startTime;
                             const percent = Math.min(95, 5 + Math.round((current / duration) * 90));
                             document.getElementById('progressFill').style.width = `${percent}%`;
-                            document.getElementById('btnText').innerText = `Native Encoding... ${percent}%`;
+                            document.getElementById('btnText').innerText = `Rendering... ${percent}%`;
 
                             requestAnimationFrame(drawLoop);
                         };
@@ -618,8 +611,8 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                if (audioSource) audioSource.stop();
-                if (audioCtx) audioCtx.close();
+                if (audioSource) { try { audioSource.stop(); } catch(e){} }
+                if (audioCtx) { try { audioCtx.close(); } catch(e){} }
                 if (processVid && processVid.parentNode) document.body.removeChild(processVid);
 
                 processBtn.disabled = false;
@@ -725,24 +718,19 @@
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
-            let ext = "MP4";
-            if (videoData.type.includes("webm")) ext = "WEBM";
-            else if (videoData.type.includes("quicktime") || (videoData.name && videoData.name.toLowerCase().endsWith(".mov"))) ext = "MOV";
-            
+            // Forces extension to .MOV, telling iOS Photos this belongs to a Live Photo grouping
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
-            const movFile = new File([videoData], `${baseName}.${ext}`, { type: videoData.type || "video/mp4" });
+            const movFile = new File([videoData], `${baseName}.MOV`, { type: "video/quicktime" });
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
                 try { 
                     await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); 
                     updateLog("✅ Live Photo Shared! Save to Photos.");
-                    return; // Avoid triggering blockable downloads
+                    return; 
                 } catch (err) { 
                     if (err.name === 'AbortError' || (err.message && err.message.toLowerCase().includes('cancel'))) {
-                        updateLog("Share sheet cancelled.");
-                        return;
+                        updateLog("Share sheet cancelled."); return;
                     }
-                    console.warn("Share failed, falling back to Zip", err);
                     fallbackZipDownload(jpgFile, movFile); 
                 }
             } else {
@@ -751,33 +739,31 @@
         }
 
         async function fallbackZipDownload(jpg, mov) {
-            updateLog("Bundling formats...");
+            updateLog("Bundling format safely...");
             try {
                 const zip = new JSZip(); 
-                // Using exact array buffer to avoid Blob reference breakage
-                zip.file(jpg.name, await jpg.arrayBuffer()); 
-                zip.file(mov.name, await mov.arrayBuffer());
+                zip.file(jpg.name, jpg); 
+                zip.file(mov.name, mov);
                 
-                // Changed from deflating to strictly 'STORE'. Fixes huge mobile memory crash that breaks ZIP execution
+                // STORE compression bypasses memory spikes causing failures on Mobile
                 const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
                 triggerDownload(content, "LivePhoto_Bundle.zip");
-                updateLog("✅ Zip saved. Airdrop to iPhone or extract to Photos.");
+                updateLog("✅ Zip saved. Airdrop to iPhone or extract into Photos.");
             } catch (err) {
-                console.error("ZIP engine failed", err);
+                console.error("ZIP fallback failed", err);
                 
-                // Bulletproof popup-blocker workaround (Render literal large buttons into the DOM):
-                updateLog("Zip creation failed. Click to save files directly:", "error");
-                
+                // Ultimate Fallback: Safari blocks double programmatic downloads. Provide massive touch targets!
+                updateLog("Files ready! Please tap both to save:", "info");
                 const logEl = document.getElementById('logText');
                 logEl.innerHTML = "";
                 
                 const btn1 = document.createElement('button');
-                btn1.innerText = "💾 Save Photo";
-                btn1.style.cssText = "padding: 8px 16px; border-radius: 8px; border: none; background: #0A84FF; color: white; font-weight: bold; cursor: pointer;";
+                btn1.innerText = "1. Save Photo 💾";
+                btn1.style.cssText = "padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent-ios); color: white; font-weight: bold; cursor: pointer;";
                 btn1.onclick = () => triggerDownload(jpg, jpg.name);
                 
                 const btn2 = document.createElement('button');
-                btn2.innerText = "🎥 Save Video";
+                btn2.innerText = "2. Save Video 🎥";
                 btn2.style.cssText = btn1.style.cssText;
                 btn2.onclick = () => triggerDownload(mov, mov.name);
                 

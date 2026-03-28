@@ -6,7 +6,6 @@
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
     
-    <!-- 100% Native Implementation: No FFmpeg, No Web Workers, No CORS Issues -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -103,7 +102,12 @@
             position: relative; height: 52px; width: 100%; background: #000; border-radius: 6px; 
             user-select: none; transform-origin: left center; will-change: width;
         }
-        .timeline-thumbnails { position: absolute; top: 0; left: 0; height: 100%; width: 100%; border-radius: 6px; overflow: hidden; }
+        
+        .timeline-thumbnails { 
+            position: absolute; top: 0; left: 0; height: 100%; width: 100%; 
+            border-radius: 6px; overflow: hidden; display: flex; flex-direction: row;
+        }
+        .timeline-thumbnails img { flex: 1; height: 100%; object-fit: cover; min-width: 0; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
         
         .trim-dim { position: absolute; top: 0; height: 100%; background: rgba(0,0,0,0.75); pointer-events: none; z-index: 5; }
         .trim-dim.left { left: 0; border-radius: 6px 0 0 6px; }
@@ -190,7 +194,6 @@
                     <div class="cover-scrubber" id="handleCover"></div>
                 </div>
             </div>
-            <div class="hint-text">Pinch or scroll to zoom • Double-tap to reset</div>
             
             <div class="options-grid">
                 <label class="option-item">
@@ -231,6 +234,10 @@
 
         let isDragging = null, autoScrollRaf = null, scrollSpeed = 0;
         let isPlaying = false, loopAnimationFrame = null, filmstripGenerationId = 0; 
+        
+        // Throttling State to prevent mobile preview lagging
+        let isSeeking = false;
+        let pendingSeekTime = null;
 
         const videoUpload = document.getElementById('videoUpload');
         const uploadLabel = document.getElementById('upload-label');
@@ -241,6 +248,7 @@
         const hiddenCanvas = document.getElementById('hiddenCanvas');
         const timeline = document.getElementById('timeline');
         const timelineWrapper = document.getElementById('timelineWrapper');
+        const thumbnailsContainer = document.getElementById('thumbnails');
 
         function setMode(mode) {
             State.mode = mode;
@@ -280,57 +288,62 @@
                 State.duration = videoPreview.duration;
                 State.startTime = 0; State.endTime = State.duration; State.coverTime = Math.min(0.5, State.duration / 2);
                 timeline.style.width = '100%'; timelineWrapper.scrollLeft = 0;
-                updateUI(); videoPreview.currentTime = State.coverTime; generateFilmstrip();
+                updateUI(); 
+                requestSeek(State.coverTime); 
+                generateThumbnails();
             };
         }
 
-        async function generateFilmstrip() {
+        // Completely rewritten robust thumbnail generator for mobile support
+        async function generateThumbnails() {
             const genId = ++filmstripGenerationId; 
             const containerWidth = timeline.offsetWidth;
-            const thumbHeight = 52;
-            const renderScale = window.devicePixelRatio || 1;
+            const numThumbs = Math.max(8, Math.floor(containerWidth / 45)); 
+            
+            thumbnailsContainer.innerHTML = '';
             
             const hiddenVid = document.createElement('video');
-            hiddenVid.muted = true; hiddenVid.playsInline = true; hiddenVid.src = State.url;
+            hiddenVid.muted = true; 
+            hiddenVid.playsInline = true; 
+            hiddenVid.src = State.url;
+            hiddenVid.style.display = 'none';
+            document.body.appendChild(hiddenVid);
+            
             await new Promise(r => {
                 if (hiddenVid.readyState >= 2) r();
                 else hiddenVid.addEventListener('loadeddata', r, { once: true });
             });
             
-            if (filmstripGenerationId !== genId) return;
-            
-            const vRatio = hiddenVid.videoWidth / hiddenVid.videoHeight;
-            let thumbWidth = thumbHeight * vRatio;
-            let numThumbs = Math.min(50, Math.ceil(containerWidth / thumbWidth));
-            thumbWidth = containerWidth / numThumbs;
-
-            const visibleCenter = timelineWrapper.scrollLeft + (timelineWrapper.clientWidth / 2);
-            let indices = Array.from({ length: numThumbs }, (_, i) => i).sort((a, b) => 
-                Math.abs((a + 0.5) * thumbWidth - visibleCenter) - Math.abs((b + 0.5) * thumbWidth - visibleCenter)
-            );
-
-            const newCanvas = document.createElement('canvas');
-            newCanvas.width = (numThumbs * thumbWidth) * renderScale;
-            newCanvas.height = thumbHeight * renderScale;
-            newCanvas.style.width = '100%'; newCanvas.style.height = '100%';
-            
-            const ctx = newCanvas.getContext('2d', { alpha: false });
-            ctx.scale(renderScale, renderScale);
-
-            const oldCanvas = document.getElementById('thumbnails').querySelector('canvas');
-            if (oldCanvas) ctx.drawImage(oldCanvas, 0, 0, numThumbs * thumbWidth, thumbHeight);
-            
-            document.getElementById('thumbnails').innerHTML = '';
-            document.getElementById('thumbnails').appendChild(newCanvas);
+            if (filmstripGenerationId !== genId) { document.body.removeChild(hiddenVid); return; }
 
             const step = State.duration / numThumbs;
-            for (let i of indices) {
-                if (filmstripGenerationId !== genId) return;
+            const c = document.createElement('canvas');
+            // Downscale heavily to save memory on mobile devices
+            c.width = hiddenVid.videoWidth / 5; 
+            c.height = hiddenVid.videoHeight / 5;
+            const ctx = c.getContext('2d');
+            
+            for (let i = 0; i < numThumbs; i++) {
+                if (filmstripGenerationId !== genId) break;
+                
                 hiddenVid.currentTime = i * step + (step/2);
-                await new Promise(r => { hiddenVid.addEventListener('seeked', r, {once: true}); setTimeout(r, 200); });
-                if (filmstripGenerationId !== genId) return;
-                ctx.drawImage(hiddenVid, i * thumbWidth, 0, thumbWidth, thumbHeight);
+                await new Promise(r => { 
+                    const finish = () => { hiddenVid.removeEventListener('seeked', finish); r(); };
+                    hiddenVid.addEventListener('seeked', finish);
+                    setTimeout(finish, 400); // Safety timeout for bad decoders
+                });
+                
+                if (filmstripGenerationId !== genId) break;
+
+                ctx.drawImage(hiddenVid, 0, 0, c.width, c.height);
+                
+                const img = document.createElement('img');
+                img.src = c.toDataURL('image/jpeg', 0.5);
+                img.onload = () => img.style.opacity = '1'; // Fade in effect
+                thumbnailsContainer.appendChild(img);
             }
+            
+            document.body.removeChild(hiddenVid);
         }
 
         function togglePlay() {
@@ -338,7 +351,7 @@
             if (isPlaying) {
                 playBtn.innerText = "⏸"; videoPreview.currentTime = State.startTime; videoPreview.play(); loopPreview();
             } else {
-                playBtn.innerText = "▶"; videoPreview.pause(); cancelAnimationFrame(loopAnimationFrame); videoPreview.currentTime = State.coverTime;
+                playBtn.innerText = "▶"; videoPreview.pause(); cancelAnimationFrame(loopAnimationFrame); requestSeek(State.coverTime);
             }
         }
         function loopPreview() {
@@ -392,17 +405,41 @@
             if (isDragging === 'left') {
                 State.startTime = Math.max(0, Math.min(time, State.endTime - minTrim));
                 if (State.coverTime < State.startTime) State.coverTime = State.startTime;
-                videoPreview.currentTime = State.startTime;
+                requestSeek(State.startTime);
             } else if (isDragging === 'right') {
                 State.endTime = Math.max(State.startTime + minTrim, Math.min(time, State.duration));
                 if (State.coverTime > State.endTime) State.coverTime = State.endTime;
-                videoPreview.currentTime = State.endTime;
+                requestSeek(State.endTime);
             } else if (isDragging === 'cover') {
                 State.coverTime = Math.max(State.startTime, Math.min(time, State.endTime));
-                videoPreview.currentTime = State.coverTime;
+                requestSeek(State.coverTime);
             }
             updateUI();
         }
+
+        // THROTLED SEEKING: Prevents mobile decoders from freezing on scrub
+        function requestSeek(time) {
+            if (!isSeeking) {
+                isSeeking = true;
+                videoPreview.currentTime = time;
+            } else {
+                pendingSeekTime = time;
+            }
+        }
+
+        videoPreview.addEventListener('seeked', () => {
+            isSeeking = false;
+            if (pendingSeekTime !== null) {
+                const t = pendingSeekTime;
+                pendingSeekTime = null;
+                requestSeek(t);
+            } else if (!isDragging && !isPlaying && Math.abs(videoPreview.currentTime - State.coverTime) < 0.1) {
+                // Update Cover image strictly when decoder is fully settled
+                hiddenCanvas.width = videoPreview.videoWidth; hiddenCanvas.height = videoPreview.videoHeight;
+                hiddenCanvas.getContext('2d').drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+                hiddenCanvas.toBlob(blob => { State.imageBlob = blob; }, 'image/jpeg', 0.95);
+            }
+        });
 
         function updateUI() {
             const pStart = (State.startTime / State.duration) * 100;
@@ -418,83 +455,44 @@
                 `Trim <span>${(State.endTime - State.startTime).toFixed(1)}s</span>` : `Trim <span>Full</span>`;
         }
 
-        let initialPinchDist = 0, initialTimelineWidth = 0, pinchCenterRatio = 0;
-        timelineWrapper.addEventListener('touchstart', e => {
-            if (e.touches.length === 2) {
-                e.preventDefault();
-                initialPinchDist = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
-                initialTimelineWidth = parseFloat(timeline.style.width) || 100;
-                pinchCenterRatio = (((e.touches[0].clientX + e.touches[1].clientX)/2) - timeline.getBoundingClientRect().left) / timeline.offsetWidth;
-            }
-        }, {passive: false});
-
-        timelineWrapper.addEventListener('touchmove', e => {
-            if (e.touches.length === 2) {
-                e.preventDefault();
-                const dist = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
-                let newWidthPercent = Math.max(100, Math.min(initialTimelineWidth * (dist / initialPinchDist), 4000));
-                timeline.style.width = `${newWidthPercent}%`;
-                const pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-                timelineWrapper.scrollLeft = (timeline.offsetWidth * pinchCenterRatio) - (pinchCenterX - timelineWrapper.getBoundingClientRect().left);
-                updateUI();
-            }
-        }, {passive: false});
-
-        timelineWrapper.addEventListener('touchend', e => {
-            if (e.touches.length < 2 && initialPinchDist > 0) { initialPinchDist = 0; generateFilmstrip(); }
-        });
-        
-        timelineWrapper.addEventListener('wheel', e => {
-            if (e.ctrlKey || e.metaKey) {
-                e.preventDefault();
-                const rect = timeline.getBoundingClientRect();
-                const pointerRatio = (e.clientX - rect.left) / timeline.offsetWidth;
-                let newWidth = Math.max(100, Math.min((parseFloat(timeline.style.width)||100) * (e.deltaY > 0 ? 0.9 : 1.1), 4000));
-                timeline.style.width = `${newWidth}%`;
-                timelineWrapper.scrollLeft = (timeline.offsetWidth * pointerRatio) - (e.clientX - timelineWrapper.getBoundingClientRect().left);
-                updateUI();
-                clearTimeout(window.wheelTimer); window.wheelTimer = setTimeout(generateFilmstrip, 300);
-            }
-        }, {passive: false});
-
-        let lastTap = 0;
-        timelineWrapper.addEventListener('pointerup', (e) => {
-            if (Date.now() - lastTap < 300 && !isDragging) {
-                e.preventDefault(); timeline.style.width = '100%'; generateFilmstrip();
-            }
-            lastTap = Date.now();
-        });
-
-        videoPreview.addEventListener('seeked', () => {
-            if (!isDragging && !isPlaying && Math.abs(videoPreview.currentTime - State.coverTime) < 0.1) {
-                hiddenCanvas.width = videoPreview.videoWidth; hiddenCanvas.height = videoPreview.videoHeight;
-                hiddenCanvas.getContext('2d').drawImage(videoPreview, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-                hiddenCanvas.toBlob(blob => { State.imageBlob = blob; }, 'image/jpeg', 0.95);
-            }
-        });
-
         // ==========================================
-        // FIXED SMART ENGINE: Audio preserved on trim
+        // FIXED SMART ENGINE: Immediate Audio Unlocker
         // ==========================================
         async function processVideoNative() {
             if (isPlaying) togglePlay();
             if (!State.file || !State.imageBlob) {
-                videoPreview.currentTime = State.coverTime; 
+                requestSeek(State.coverTime); 
                 return updateLog("Extracting cover frame, please try again.", "error");
             }
             
             processBtn.disabled = true;
             document.getElementById('progressFill').style.width = "5%";
             
+            // --- CRITICAL AUDIO FIX ---
+            // Audio context MUST be created and resumed synchronously on the click event. 
+            // If it is inside an await block, iOS Safari permanently disables audio rendering.
             let audioCtx = null;
+            let audioDest = null;
+            
+            const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
+            const needsReencoding = isTrimmed || State.muteAudio;
+
+            if (needsReencoding && !State.muteAudio) {
+                try {
+                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                    if (AudioContextClass) {
+                        audioCtx = new AudioContextClass();
+                        audioCtx.resume();
+                        audioDest = audioCtx.createMediaStreamDestination();
+                    }
+                } catch (e) { console.warn("Audio Context Init Failed:", e); }
+            }
+
             let sourceNode = null;
             let processVid = null; 
 
             try {
                 let finalVideoFile;
-                
-                const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
-                const needsReencoding = isTrimmed || State.muteAudio;
 
                 if (!needsReencoding) {
                     // Bypass rendering completely! Pass the original file directly into the bundler
@@ -506,13 +504,12 @@
                     document.getElementById('btnText').innerText = "Recording Output...";
                     
                     // 1. Create a hidden video element and ATTACH it to the DOM. 
-                    // (Browsers disable audio processing entirely for detached elements to save battery)
                     processVid = document.createElement('video');
                     processVid.src = State.url;
                     processVid.playsInline = true;
                     processVid.crossOrigin = "anonymous";
-                    processVid.style.display = 'none'; // Keep it invisible
-                    processVid.muted = true; // Mute initially to bypass Autoplay blockers during load
+                    processVid.style.display = 'none'; 
+                    processVid.muted = true; // Mute initially to bypass Autoplay blockers
                     document.body.appendChild(processVid);
                     
                     // Wait for video to be ready
@@ -523,25 +520,15 @@
 
                     let audioTrack = null;
 
-                    // 2. Setup Web Audio API to route audio to the recorder (away from speakers)
-                    if (!State.muteAudio) {
+                    // 2. Safely route Audio away from speakers into the recorder
+                    if (audioCtx && audioDest) {
                         try {
-                            const AudioContext = window.AudioContext || window.webkitAudioContext;
-                            audioCtx = new AudioContext();
-                            await audioCtx.resume(); 
-
                             sourceNode = audioCtx.createMediaElementSource(processVid);
-                            const audioDestination = audioCtx.createMediaStreamDestination();
-                            
-                            // Route video audio -> destination node (Not the speakers)
-                            sourceNode.connect(audioDestination);
-                            audioTrack = audioDestination.stream.getAudioTracks()[0];
-                            
-                            // NOW it is safe to unmute the video natively. It won't play out loud, 
-                            // but the browser's audio decoder will wake up and push data to the track.
-                            processVid.muted = false; 
+                            sourceNode.connect(audioDest);
+                            audioTrack = audioDest.stream.getAudioTracks()[0];
+                            processVid.muted = false; // Safe to unmute now, it is isolated!
                         } catch (err) {
-                            console.warn("Audio extraction fallback triggered:", err);
+                            console.warn("Audio routing failed:", err);
                         }
                     }
 
@@ -557,18 +544,17 @@
                     if (audioTrack) tracks.push(audioTrack);
                     const combinedStream = new MediaStream(tracks);
 
-                    // 5. Select Best Available Output Format (Added fallback arrays)
+                    // 5. Select Best Available Output Format
                     const mimeTypes = [
                         'video/mp4', 
                         'video/webm;codecs=vp8,opus', 
-                        'video/webm;codecs=vp9,opus', 
                         'video/webm'
                     ];
                     const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
 
                     const recorder = new MediaRecorder(combinedStream, { 
                         mimeType: mimeType,
-                        videoBitsPerSecond: 8000000 
+                        videoBitsPerSecond: 6000000 
                     });
                     
                     const chunks = [];
@@ -586,7 +572,6 @@
 
                     await new Promise(resolve => {
                         const drawLoop = () => {
-                            // Stop condition
                             if (processVid.currentTime >= State.endTime || processVid.ended) {
                                 processVid.pause();
                                 recorder.stop();
@@ -623,7 +608,7 @@
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                // IMPORTANT CLEANUP to prevent memory leaks and zombie audio nodes
+                // CLEANUP: Prevent memory leaks and zombie audio nodes
                 if (sourceNode) sourceNode.disconnect();
                 if (audioCtx) audioCtx.close();
                 if (processVid && processVid.parentNode) document.body.removeChild(processVid);
@@ -631,7 +616,7 @@
                 processBtn.disabled = false;
                 document.getElementById('btnText').innerText = "Create Live Photo";
                 document.getElementById('progressFill').style.width = "0%";
-                videoPreview.currentTime = State.coverTime;
+                requestSeek(State.coverTime);
             }
         }
 

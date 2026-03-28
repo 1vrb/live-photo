@@ -6,9 +6,9 @@
     <title>Live Photo Studio Pro</title>
     <link rel="icon" href="data:,">
     
-    <!-- External Libraries: FFmpeg v0.12 UMD via stable jsDelivr CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+    <!-- External Libraries: FFmpeg v0.12 UMD -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -210,7 +210,6 @@
             </div>
         </div>
 
-        <!-- This triggers the Bulletproof Orchestrator -->
         <button id="processBtn" class="process-btn hidden" onclick="processVideo()">
             <div class="progress-fill" id="progressFill"></div>
             <span class="btn-text" id="btnText">Create Live Photo</span>
@@ -261,7 +260,7 @@
         }
 
         // ==========================================
-        // FFmpeg ENGINE PRELOAD
+        // FFmpeg ENGINE PRELOAD (100% BLOB BYPASS)
         // ==========================================
         async function preloadFFmpeg() {
             if (ffmpegInstance) return true;
@@ -284,17 +283,19 @@
                     document.getElementById('btnText').innerText = `Encoding FFmpeg... ${percent}%`;
                 });
 
-                const baseURLCore = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-                const baseURLFFmpeg = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+                const baseURLCore = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                const baseURLFFmpeg = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
                 
-                // THE FIX: Only convert the class worker to a Blob URL to satisfy CORS rules.
-                // Keep the coreURL & wasmURL as RAW HTTPS links to prevent internal Blob-Sandbox failures!
+                // THE FIX: We convert ALL THREE files into Blob URLs.
+                // This guarantees the Worker will never try to make a cross-origin network request.
+                const coreBlobURL = await toBlobURL(`${baseURLCore}/ffmpeg-core.js`, 'text/javascript');
+                const wasmBlobURL = await toBlobURL(`${baseURLCore}/ffmpeg-core.wasm`, 'application/wasm');
                 const workerBlobURL = await toBlobURL(`${baseURLFFmpeg}/814.ffmpeg.js`, 'text/javascript');
 
                 await ffmpegInstance.load({
-                    classWorkerURL: workerBlobURL,
-                    coreURL: `${baseURLCore}/ffmpeg-core.js`,
-                    wasmURL: `${baseURLCore}/ffmpeg-core.wasm`
+                    coreURL: coreBlobURL,
+                    wasmURL: wasmBlobURL,
+                    classWorkerURL: workerBlobURL
                 });
                 
                 console.log("FFmpeg Engine Ready");
@@ -334,7 +335,7 @@
             
             if (isPlaying) togglePlay(); 
 
-            // Silently preload FFmpeg in background
+            // Preload FFmpeg silently in background while user trims
             preloadFFmpeg();
 
             videoPreview.onloadedmetadata = () => {
@@ -534,7 +535,6 @@
             }
         });
 
-
         // ==========================================
         // BULLETPROOF PROCESS ORCHESTRATOR
         // ==========================================
@@ -552,10 +552,10 @@
             try {
                 let ffmpegSuccess = false;
                 
-                // 1. Try to load FFmpeg
+                // 1. Ensure FFmpeg is loaded
                 const isLoaded = await preloadFFmpeg();
                 
-                // 2. If it loaded, try to execute FFmpeg
+                // 2. Try FFmpeg Encoding
                 if (isLoaded && ffmpegInstance) {
                     try {
                         await processVideoFFmpeg();
@@ -568,7 +568,7 @@
                     updateLog("FFmpeg blocked by browser. Using Native Engine...");
                 }
 
-                // 3. Fallback to Native Engine if FFmpeg threw an error or didn't load
+                // 3. Auto-Fallback if FFmpeg failed
                 if (!ffmpegSuccess) {
                     await processVideoNative();
                 }
@@ -586,7 +586,7 @@
 
 
         // ==========================================
-        // ENGINE 1: FFmpeg (High Quality / Apple Quicktime Native)
+        // ENGINE 1: FFmpeg (High Quality / Native Apple Quicktime)
         // ==========================================
         async function processVideoFFmpeg() {
             const { fetchFile } = window.FFmpegUtil;
@@ -638,11 +638,9 @@
         // ENGINE 2: Native Web API (Bulletproof Fallback)
         // ==========================================
         async function processVideoNative() {
-            // Seek to start
             videoPreview.currentTime = State.startTime;
             await new Promise(r => { videoPreview.addEventListener('seeked', r, {once: true}); });
 
-            // Extract Native Stream
             let stream;
             if (videoPreview.captureStream) {
                 stream = videoPreview.captureStream();
@@ -816,7 +814,7 @@
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
-            const movFile = new File([videoData], `${baseName}.MP4`, { type: videoData.type });
+            const movFile = new File([videoData], `${baseName}.MOV`, { type: videoData.type });
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
                 try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); } 

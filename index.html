@@ -1,3 +1,5 @@
+--- START OF FILE Paste March 28, 2026 - 9:47PM ---
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -444,309 +446,267 @@
         }
 
         // ==========================================
+        // iOS STRICT BINARY METADATA INJECTORS
+        // ==========================================
+        function buildAppleMakerNote(uuid) {
+            const maker = new Uint8Array(75);
+            maker.set([65, 112, 112, 108, 101, 32, 105, 79, 83, 0, 0, 1], 0); // "Apple iOS\0\0\x01"
+            maker.set([77, 77, 0, 42, 0, 0, 0, 8], 12); // Endianness MM, TIFF Magic
+            maker.set([0, 1], 20); // 1 Entry
+            maker.set([0, 17, 0, 2, 0, 0, 0, 37, 0, 0, 0, 26], 22); // Tag 0x0011 (Asset ID), Type ASCII, Length 37, Offset 26
+            maker.set([0, 0, 0, 0], 34); // Next IFD
+            maker.set(new TextEncoder().encode(uuid), 38);
+            maker[74] = 0; // Null terminator
+            return maker;
+        }
+
+        function buildQuickTimeMetaBox(uuid) {
+            const uuidBytes = new TextEncoder().encode(uuid);
+            const keyBytes = new TextEncoder().encode("com.apple.quicktime.content.identifier");
+
+            const dataBox = new Uint8Array(16 + uuidBytes.length);
+            const viewData = new DataView(dataBox.buffer);
+            viewData.setUint32(0, dataBox.length); dataBox.set(new TextEncoder().encode('data'), 4);
+            viewData.setUint32(8, 1); // type UTF-8
+            dataBox.set(uuidBytes, 16);
+
+            const itemBox = new Uint8Array(8 + dataBox.length);
+            const viewItem = new DataView(itemBox.buffer);
+            viewItem.setUint32(0, itemBox.length); viewItem.setUint32(4, 1); 
+            itemBox.set(dataBox, 8);
+
+            const ilstBox = new Uint8Array(8 + itemBox.length);
+            new DataView(ilstBox.buffer).setUint32(0, ilstBox.length); ilstBox.set(new TextEncoder().encode('ilst'), 4);
+            ilstBox.set(itemBox, 8);
+
+            const mdtaBox = new Uint8Array(8 + keyBytes.length);
+            new DataView(mdtaBox.buffer).setUint32(0, mdtaBox.length); mdtaBox.set(new TextEncoder().encode('mdta'), 4);
+            mdtaBox.set(keyBytes, 8);
+
+            const keysBox = new Uint8Array(16 + mdtaBox.length);
+            const viewKeys = new DataView(keysBox.buffer);
+            viewKeys.setUint32(0, keysBox.length); keysBox.set(new TextEncoder().encode('keys'), 4);
+            viewKeys.setUint32(12, 1); 
+            keysBox.set(mdtaBox, 16);
+
+            const hdlrBox = new Uint8Array(33);
+            const viewHdlr = new DataView(hdlrBox.buffer);
+            viewHdlr.setUint32(0, hdlrBox.length); hdlrBox.set(new TextEncoder().encode('hdlr'), 4);
+            hdlrBox.set(new TextEncoder().encode('mdir'), 16); hdlrBox.set(new TextEncoder().encode('appl'), 20);
+
+            const metaBox = new Uint8Array(12 + hdlrBox.length + keysBox.length + ilstBox.length);
+            new DataView(metaBox.buffer).setUint32(0, metaBox.length); metaBox.set(new TextEncoder().encode('meta'), 4);
+            let offset = 12;
+            metaBox.set(hdlrBox, offset); offset += hdlrBox.length;
+            metaBox.set(keysBox, offset); offset += keysBox.length;
+            metaBox.set(ilstBox, offset);
+
+            const udtaBox = new Uint8Array(8 + metaBox.length);
+            new DataView(udtaBox.buffer).setUint32(0, udtaBox.length); udtaBox.set(new TextEncoder().encode('udta'), 4);
+            udtaBox.set(metaBox, 8);
+
+            return udtaBox;
+        }
+
+        function injectAppleVideoMetadata(mp4Buffer, uuid) {
+            const arr = new Uint8Array(mp4Buffer);
+            const view = new DataView(mp4Buffer);
+            let offset = 0, moovStart = -1, moovSize = 0, ftypStart = -1;
+
+            while (offset < arr.length) {
+                const size = view.getUint32(offset);
+                const type = String.fromCharCode(arr[offset+4], arr[offset+5], arr[offset+6], arr[offset+7]);
+                if (type === 'ftyp') ftypStart = offset;
+                if (type === 'moov') { moovStart = offset; moovSize = size; break; }
+                offset += size;
+            }
+
+            if (ftypStart !== -1) arr.set(new TextEncoder().encode('qt  '), ftypStart + 8); // Change to QuickTime
+
+            // Insert UDTA to the END of the moov box (Works safely if muxer wrote moov at the end of the file)
+            const udtaBox = buildQuickTimeMetaBox(uuid);
+            const before = new Uint8Array(mp4Buffer, 0, moovStart + moovSize);
+            const after = new Uint8Array(mp4Buffer, moovStart + moovSize);
+            const newBuffer = new Uint8Array(before.length + udtaBox.length + after.length);
+            
+            newBuffer.set(before, 0);
+            newBuffer.set(udtaBox, before.length);
+            newBuffer.set(after, before.length + udtaBox.length);
+            new DataView(newBuffer.buffer).setUint32(moovStart, moovSize + udtaBox.length);
+
+            return newBuffer;
+        }
+
+        // ==========================================
         // LIGHTNING-FAST WEBCODECS ENGINE
         // ==========================================
         async function processVideoNative() {
-            if (!window.VideoEncoder) {
-                return updateLog("Your browser does not support WebCodecs. Please use Chrome or Safari.", "error");
-            }
-            
+            if (!window.VideoEncoder) return updateLog("WebCodecs unsupported. Use Chrome/Safari.", "error");
             if (isPlaying) togglePlay();
             if (!State.file || !State.imageBlob) {
-                requestSeek(State.coverTime); 
-                return updateLog("Extracting cover frame, please try again.", "error");
+                requestSeek(State.coverTime); return updateLog("Extracting cover frame...", "error");
             }
             
             processBtn.disabled = true;
             document.getElementById('progressFill').style.width = "5%";
             updateLog("");
-            
-            const isTrimmed = (State.startTime > 0.1 || State.endTime < State.duration - 0.1);
-            const needsReencoding = isTrimmed || State.muteAudio;
 
             try {
-                let finalVideoFile;
+                let finalVideoBuffer;
+                document.getElementById('btnText').innerText = "Initializing Fast Engine...";
 
-                if (!needsReencoding) {
-                    document.getElementById('btnText').innerText = "Using Original Video...";
-                    document.getElementById('progressFill').style.width = "50%";
-                    finalVideoFile = State.file;
-                    await new Promise(r => setTimeout(r, 600)); 
-                } else {
-                    document.getElementById('btnText').innerText = "Initializing Fast Engine...";
+                let processVid = document.createElement('video');
+                processVid.src = State.url; processVid.muted = true; processVid.playsInline = true; 
+                processVid.style.position = 'fixed'; processVid.style.opacity = '0'; 
+                document.body.appendChild(processVid);
+                processVid.load();
 
-                    // 1. SETUP VIDEO & DIMENSIONS
-                    let processVid = document.createElement('video');
-                    processVid.src = State.url;
-                    processVid.muted = true;
-                    processVid.playsInline = true;
-                    processVid.preload = 'metadata'; // Force mobile browsers to load metadata
-                    
-                    // Fix for Android/iOS: Attach to DOM immediately and call load()
-                    // If we don't do this, mobile browsers suspend the video and it hangs forever.
-                    processVid.style.position = 'fixed'; 
-                    processVid.style.opacity = '0'; 
-                    processVid.style.pointerEvents = 'none';
-                    document.body.appendChild(processVid);
-                    processVid.load();
+                await new Promise((res, rej) => { 
+                    if (processVid.readyState >= 1) res(); else { processVid.onloadedmetadata = res; processVid.onerror = rej; }
+                });
+                
+                let outW = processVid.videoWidth; let outH = processVid.videoHeight;
+                if (outW > 1920 || outH > 1920) { const r = Math.min(1920/outW, 1920/outH); outW = Math.round(outW*r); outH = Math.round(outH*r); }
+                outW -= outW % 2; outH -= outH % 2; 
 
-                    await new Promise((resolve, reject) => { 
-                        if (processVid.readyState >= 1) resolve(); // HAVE_METADATA
-                        else {
-                            processVid.onloadedmetadata = resolve;
-                            processVid.onerror = () => reject(new Error("Failed to load video metadata on this device."));
-                        }
-                    });
-                    
-                    const MAX_DIMENSION = 1920; 
-                    let outW = processVid.videoWidth; let outH = processVid.videoHeight;
-                    if (outW > MAX_DIMENSION || outH > MAX_DIMENSION) {
-                        const ratio = Math.min(MAX_DIMENSION / outW, MAX_DIMENSION / outH);
-                        outW = Math.round(outW * ratio); outH = Math.round(outH * ratio);
-                    }
-                    outW -= outW % 2; outH -= outH % 2; // Must be even numbers for MP4 encoder
+                hiddenCanvas.width = outW; hiddenCanvas.height = outH;
+                const ctx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
 
-                    hiddenCanvas.width = outW; hiddenCanvas.height = outH;
-                    const ctx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+                const AUDIO_SR = 44100;
+                let audioDataToEncode = null; let extractedChannels = 2;
 
-                    // Default to 44100Hz audio, 2 Channels for best compatibility
-                    const AUDIO_SR = 44100;
-                    let hasAudio = false;
-
-                    // 2. AUDIO PROCESSING (Instantaneous in-memory processing)
-                    if (!State.muteAudio) {
-                        document.getElementById('btnText').innerText = "Processing Audio (Fast)...";
-                        try {
-                            const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-                            const audioCtx = new OfflineCtx(2, AUDIO_SR, AUDIO_SR); // Dummy context to decode file
-                            const fileBuffer = await State.file.arrayBuffer();
-                            
-                            // Decode whole file
-                            const decodedBuffer = await new Promise((res, rej) => audioCtx.decodeAudioData(fileBuffer, res, rej));
-                            hasAudio = true;
-                            
-                            // Create a new offline context exactly the length of our trim!
-                            const trimDuration = State.endTime - State.startTime;
-                            const renderCtx = new OfflineCtx(2, Math.ceil(AUDIO_SR * trimDuration), AUDIO_SR);
-                            
-                            const source = renderCtx.createBufferSource();
-                            source.buffer = decodedBuffer;
-                            source.connect(renderCtx.destination);
-                            source.start(0, State.startTime, trimDuration);
-                            
-                            const renderedTrimmedAudio = await renderCtx.startRendering();
-
-                            // 3. SETUP MUXER (Only include audio if we successfully extracted it)
-                            var muxer = new Mp4Muxer.Muxer({
-                                target: new Mp4Muxer.ArrayBufferTarget(),
-                                video: { codec: 'avc', width: outW, height: outH },
-                                audio: { codec: 'aac', numberOfChannels: 2, sampleRate: AUDIO_SR },
-                                fastStart: 'in-memory'
-                            });
-
-                            // 4. ENCODE TRIMMED AUDIO
-                            const audioEncoder = new AudioEncoder({
-                                output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-                                error: e => console.warn("Audio Encode Error:", e)
-                            });
-                            audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: AUDIO_SR, numberOfChannels: 2, bitrate: 128000 });
-
-                            const numChannels = renderedTrimmedAudio.numberOfChannels;
-                            const totalFrames = renderedTrimmedAudio.length;
-                            const frameSize = 1024; // Standard AAC chunk size
-
-                            for (let i = 0; i < totalFrames; i += frameSize) {
-                                const size = Math.min(frameSize, totalFrames - i);
-                                const planarData = new Float32Array(numChannels * size);
-                                
-                                for (let c = 0; c < numChannels; c++) {
-                                    planarData.set(renderedTrimmedAudio.getChannelData(c).subarray(i, i + size), c * size);
-                                }
-
-                                const audioData = new AudioData({
-                                    format: 'f32-planar',
-                                    sampleRate: AUDIO_SR,
-                                    numberOfFrames: size,
-                                    numberOfChannels: numChannels,
-                                    timestamp: (i / AUDIO_SR) * 1e6,
-                                    data: planarData
-                                });
-                                
-                                audioEncoder.encode(audioData);
-                                audioData.close();
-                            }
-                            await audioEncoder.flush();
-                            audioEncoder.close();
-
-                        } catch(e) { 
-                            console.warn("Audio extraction skipped (video might have no audio track):", e); 
-                            hasAudio = false; 
-                        }
-                    }
-
-                    // Fallback muxer if audio was muted or failed
-                    if (!muxer || !hasAudio || State.muteAudio) {
-                        muxer = new Mp4Muxer.Muxer({
-                            target: new Mp4Muxer.ArrayBufferTarget(),
-                            video: { codec: 'avc', width: outW, height: outH },
-                            fastStart: 'in-memory'
-                        });
-                    }
-
-                    // 5. VIDEO PROCESSING (Accelerated Frame Extraction)
-                    document.getElementById('btnText').innerText = "Rendering Video (Fast)...";
-                    const videoEncoder = new VideoEncoder({
-                        output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-                        error: e => console.error("Video Encode Error:", e)
-                    });
-                    
-                    videoEncoder.configure({
-                        codec: 'avc1.4d002a', // Highly compatible H.264 profile
-                        width: outW, height: outH,
-                        hardwareAcceleration: 'prefer-hardware',
-                        bitrate: (outW * outH) > 2000000 ? 8_000_000 : 5_000_000
-                    });
-
-                    let currentTime = State.startTime;
-                    const fps = 30;
-                    const frameDuration = 1 / fps; 
-                    let frameCount = 0;
-
-                    // (Video element was already attached to DOM in Step 1 to fix mobile loading bugs)
-
-                    while (currentTime <= State.endTime) {
-                        // Rapidly seek video (hardware decoded)
-                        await new Promise(r => {
-                            const onSeek = () => { processVid.removeEventListener('seeked', onSeek); r(); };
-                            processVid.addEventListener('seeked', onSeek);
-                            processVid.currentTime = currentTime;
-                        });
-
-                        ctx.drawImage(processVid, 0, 0, outW, outH);
+                if (!State.muteAudio) {
+                    document.getElementById('btnText').innerText = "Processing Audio...";
+                    try {
+                        const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+                        const audioCtx = new OfflineCtx(2, AUDIO_SR, AUDIO_SR); 
+                        const fileBuffer = await State.file.arrayBuffer();
+                        const decodedBuffer = await new Promise((res, rej) => audioCtx.decodeAudioData(fileBuffer, res, rej));
                         
-                        const frame = new VideoFrame(hiddenCanvas, { 
-                            timestamp: frameCount * frameDuration * 1e6 
-                        });
+                        const trimDuration = State.endTime - State.startTime;
+                        const renderCtx = new OfflineCtx(2, Math.ceil(AUDIO_SR * trimDuration), AUDIO_SR);
+                        const source = renderCtx.createBufferSource();
+                        source.buffer = decodedBuffer; source.connect(renderCtx.destination);
+                        source.start(0, State.startTime, trimDuration);
                         
-                        // Force a keyframe on the first frame to satisfy Apple format requirements
-                        videoEncoder.encode(frame, { keyFrame: frameCount === 0 });
-                        frame.close();
-                        
-                        currentTime += frameDuration;
-                        frameCount++;
-
-                        // Update UI seamlessly
-                        if (frameCount % 3 === 0) {
-                            const percent = Math.min(95, 5 + Math.round(((currentTime - State.startTime) / (State.endTime - State.startTime)) * 90));
-                            document.getElementById('progressFill').style.width = `${percent}%`;
-                            document.getElementById('btnText').innerText = `Encoding Native... ${percent}%`;
-                        }
-                    }
-
-                    await videoEncoder.flush();
-                    videoEncoder.close();
-                    muxer.finalize();
-                    
-                    // Cleanup
-                    document.body.removeChild(processVid);
-                    processVid.removeAttribute('src');
-
-                    // Generate final high-quality file
-                    finalVideoFile = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+                        audioDataToEncode = await renderCtx.startRendering();
+                        extractedChannels = audioDataToEncode.numberOfChannels;
+                    } catch(e) { console.warn("No audio track detected."); }
                 }
+
+                // IMPORTANT: Do NOT use fastStart for iOS processing, so moov is safely written at the end
+                let muxer = new Mp4Muxer.Muxer({
+                    target: new Mp4Muxer.ArrayBufferTarget(),
+                    video: { codec: 'avc', width: outW, height: outH },
+                    audio: { codec: 'aac', numberOfChannels: audioDataToEncode ? extractedChannels : 2, sampleRate: AUDIO_SR }
+                });
+
+                const audioEncoder = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: console.warn });
+                audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: AUDIO_SR, numberOfChannels: audioDataToEncode ? extractedChannels : 2, bitrate: 128000 });
+
+                // Fill Audio: Either real extracted audio, or explicit SILENCE (fixes Android parsing errors)
+                const totalAudioFrames = Math.ceil(AUDIO_SR * (State.endTime - State.startTime));
+                const frameSize = 1024;
+                for (let i = 0; i < totalAudioFrames; i += frameSize) {
+                    const size = Math.min(frameSize, totalAudioFrames - i);
+                    const planarData = new Float32Array((audioDataToEncode ? extractedChannels : 2) * size);
+                    if (audioDataToEncode) {
+                        for (let c = 0; c < extractedChannels; c++) planarData.set(audioDataToEncode.getChannelData(c).subarray(i, i + size), c * size);
+                    } // else it remains full of zeros (silence)
+                    const ad = new AudioData({ format: 'f32-planar', sampleRate: AUDIO_SR, numberOfFrames: size, numberOfChannels: audioDataToEncode ? extractedChannels : 2, timestamp: (i / AUDIO_SR) * 1e6, data: planarData });
+                    audioEncoder.encode(ad); ad.close();
+                }
+                await audioEncoder.flush(); audioEncoder.close();
+
+                document.getElementById('btnText').innerText = "Fast Rendering Video...";
+                const videoEncoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: console.error });
+                videoEncoder.configure({ codec: 'avc1.4d002a', width: outW, height: outH, hardwareAcceleration: 'prefer-hardware', bitrate: (outW * outH) > 2000000 ? 8000000 : 5000000 });
+
+                let frameCount = 0; let lastMediaTime = -1;
+                await new Promise((resolve) => {
+                    const captureFrame = (now, metadata) => {
+                        const currentMediaTime = metadata ? metadata.mediaTime : processVid.currentTime;
+                        if (currentMediaTime >= State.endTime) { processVid.pause(); resolve(); return; }
+                        
+                        if (currentMediaTime !== lastMediaTime) {
+                            lastMediaTime = currentMediaTime;
+                            ctx.drawImage(processVid, 0, 0, outW, outH);
+                            const frame = new VideoFrame(hiddenCanvas, { timestamp: Math.max(0, (currentMediaTime - State.startTime)) * 1e6 });
+                            videoEncoder.encode(frame, { keyFrame: frameCount === 0 });
+                            frame.close(); frameCount++;
+                            
+                            if (frameCount % 4 === 0) {
+                                const p = Math.min(95, 5 + Math.round(((currentMediaTime - State.startTime) / (State.endTime - State.startTime)) * 90));
+                                document.getElementById('progressFill').style.width = `${p}%`; document.getElementById('btnText').innerText = `Encoding Native... ${p}%`;
+                            }
+                        }
+                        if ('requestVideoFrameCallback' in processVid) processVid.requestVideoFrameCallback(captureFrame); else requestAnimationFrame(captureFrame);
+                    };
+
+                    processVid.currentTime = State.startTime;
+                    processVid.playbackRate = 2.5; // High-speed linear playback fixes mobile seek lag
+                    processVid.play().then(() => {
+                        if ('requestVideoFrameCallback' in processVid) processVid.requestVideoFrameCallback(captureFrame); else requestAnimationFrame(captureFrame);
+                    });
+                });
+
+                await videoEncoder.flush(); videoEncoder.close(); muxer.finalize();
+                document.body.removeChild(processVid);
+
+                finalVideoBuffer = muxer.target.buffer;
+
+                if (State.mode === 'ios') finalVideoBuffer = injectAppleVideoMetadata(finalVideoBuffer, State.uuid);
 
                 document.getElementById('btnText').innerText = "Applying Metadata...";
                 document.getElementById('progressFill').style.width = "95%";
 
                 const imageBytes = await applyEXIFData();
-                if (State.mode === 'android') {
-                    await createAndroidUniversal(finalVideoFile, imageBytes);
-                } else {
-                    await createIOSBundle(finalVideoFile, imageBytes);
-                }
+                if (State.mode === 'android') await createAndroidUniversal(finalVideoBuffer, imageBytes);
+                else await createIOSBundle(finalVideoBuffer, imageBytes);
                 
             } catch (err) {
                 console.error(err); updateLog("Error: " + err.message, "error");
             } finally {
-                processBtn.disabled = false;
-                document.getElementById('btnText').innerText = "Create Live Photo";
-                document.getElementById('progressFill').style.width = "0%";
-                requestSeek(State.coverTime);
+                processBtn.disabled = false; document.getElementById('btnText').innerText = "Create Live Photo";
+                document.getElementById('progressFill').style.width = "0%"; requestSeek(State.coverTime);
             }
         }
 
         // ==========================================
-        // METADATA & BUNDLING
+        // EXIF & METADATA BUNDLING
         // ==========================================
         async function applyEXIFData() {
-            const reader = new FileReader();
-            reader.readAsDataURL(State.imageBlob);
+            const reader = new FileReader(); reader.readAsDataURL(State.imageBlob);
             await new Promise(r => reader.onload = r);
             let jpegData = reader.result;
 
             let exifObj = {"0th": {}, "Exif": {}};
             try { exifObj = piexif.load(jpegData); } catch(e) {}
 
-            const pad = n => String(n).padStart(2, '0');
-            const d = State.originalDate;
+            const pad = n => String(n).padStart(2, '0'); const d = State.originalDate;
             const dateStr = `${d.getFullYear()}:${pad(d.getMonth()+1)}:${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 
-            exifObj["0th"][piexif.ImageIFD.DateTime] = dateStr;
-            exifObj["Exif"][piexif.ExifIFD.DateTimeOriginal] = dateStr;
-            exifObj["Exif"][piexif.ExifIFD.DateTimeDigitized] = dateStr;
-
-            const devMap = {
-                'Apple': { make: 'Apple', model: 'iPhone 15 Pro' },
-                'Samsung': { make: 'samsung', model: 'SM-S928U' },
-                'Google': { make: 'Google', model: 'Pixel 8 Pro' }
-            };
-            exifObj["0th"][piexif.ImageIFD.Make] = devMap[State.spoofDevice].make;
-            exifObj["0th"][piexif.ImageIFD.Model] = devMap[State.spoofDevice].model;
+            exifObj["0th"][piexif.ImageIFD.DateTime] = dateStr; exifObj["Exif"][piexif.ExifIFD.DateTimeOriginal] = dateStr;
+            const devMap = { 'Apple': { make: 'Apple', model: 'iPhone 15 Pro' }, 'Samsung': { make: 'samsung', model: 'SM-S928U' }, 'Google': { make: 'Google', model: 'Pixel 8 Pro' } };
+            exifObj["0th"][piexif.ImageIFD.Make] = devMap[State.spoofDevice].make; exifObj["0th"][piexif.ImageIFD.Model] = devMap[State.spoofDevice].model;
 
             if (State.mode === 'ios') {
-                exifObj["Exif"][piexif.ExifIFD.ImageUniqueID] = State.uuid;
-                exifObj["0th"][piexif.ImageIFD.DocumentName] = State.uuid;
+                const makerNoteBytes = buildAppleMakerNote(State.uuid);
+                let makerNoteStr = ""; for(let i=0; i<makerNoteBytes.length; i++) makerNoteStr += String.fromCharCode(makerNoteBytes[i]);
+                exifObj["Exif"][piexif.ExifIFD.MakerNote] = makerNoteStr;
             }
 
             const newJpegBase64 = piexif.insert(piexif.dump(exifObj), jpegData);
             const byteString = atob(newJpegBase64.split(',')[1]);
-            const ia = new Uint8Array(byteString.length);
-            for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+            const ia = new Uint8Array(byteString.length); for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
             return ia;
         }
 
-        async function createAndroidUniversal(videoData, imageBytes) {
-            const videoArrayBuffer = await videoData.arrayBuffer();
+        async function createAndroidUniversal(videoArrayBuffer, imageBytes) {
             const videoLength = videoArrayBuffer.byteLength;
             const presentationTimeUs = Math.max(0, Math.round((State.coverTime - State.startTime) * 1000000));
 
-            const xmpData = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0-jc003">
-  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-    <rdf:Description rdf:about=""
-        xmlns:Container="http://ns.google.com/photos/1.0/container/"
-        xmlns:Item="http://ns.google.com/photos/1.0/container/item/"
-        xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"
-        xmlns:xiaomi="http://ns.xiaomi.com/photos/1.0/camera/"
-      GCamera:MotionPhoto="1"
-      GCamera:MotionPhotoVersion="1"
-      GCamera:MotionPhotoPresentationTimestampUs="${presentationTimeUs}"
-      GCamera:MicroVideo="1"
-      GCamera:MicroVideoVersion="1"
-      GCamera:MicroVideoOffset="${videoLength}"
-      GCamera:MicroVideoPresentationTimestampUs="${presentationTimeUs}"
-      xiaomi:MicroVideo="1"
-      xiaomi:MicroVideoVersion="1">
-      <Container:Directory>
-        <rdf:Seq>
-          <rdf:li rdf:parseType="Resource"><Container:Item Item:Semantic="Primary" Item:Mime="image/jpeg" Item:Length="0"/></rdf:li>
-          <rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="${videoLength}" Item:Padding="0"/></rdf:li>
-        </rdf:Seq>
-      </Container:Directory>
-    </rdf:Description>
-  </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>`;
+            const xmpData = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0-jc003"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:Container="http://ns.google.com/photos/1.0/container/" xmlns:Item="http://ns.google.com/photos/1.0/container/item/" xmlns:GCamera="http://ns.google.com/photos/1.0/camera/" xmlns:xiaomi="http://ns.xiaomi.com/photos/1.0/camera/" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" GCamera:MotionPhotoPresentationTimestampUs="${presentationTimeUs}" GCamera:MicroVideo="1" GCamera:MicroVideoVersion="1" GCamera:MicroVideoOffset="${videoLength}" GCamera:MicroVideoPresentationTimestampUs="${presentationTimeUs}" xiaomi:MicroVideo="1" xiaomi:MicroVideoVersion="1"><Container:Directory><rdf:Seq><rdf:li rdf:parseType="Resource"><Container:Item Item:Semantic="Primary" Item:Mime="image/jpeg" Item:Length="0"/></rdf:li><rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="${videoLength}" Item:Padding="0"/></rdf:li></rdf:Seq></Container:Directory></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
 
             const xmpBuffer = new TextEncoder().encode(xmpData);
             const namespace = new TextEncoder().encode("http://ns.adobe.com/xap/1.0/\0");
@@ -756,83 +716,53 @@
             app1Segment.set(app1Header, 0); app1Segment.set(namespace, app1Header.length); app1Segment.set(xmpBuffer, app1Header.length + namespace.length);
 
             let insertPos = 2; 
-            if (imageBytes[insertPos] === 0xFF && imageBytes[insertPos+1] === 0xE0) {
-                insertPos += 2 + ((imageBytes[insertPos+2] << 8) | imageBytes[insertPos+3]);
-            }
+            if (imageBytes[insertPos] === 0xFF && imageBytes[insertPos+1] === 0xE0) insertPos += 2 + ((imageBytes[insertPos+2] << 8) | imageBytes[insertPos+3]);
 
-            const finalBuffer = new Uint8Array(insertPos + app1Segment.length + (imageBytes.length - insertPos) + videoLength);
+            // Fix Google Photos Padding crash (Requires exact Even boundaries)
+            let jpegLen = insertPos + app1Segment.length + (imageBytes.length - insertPos);
+            let padding = (jpegLen % 2 !== 0) ? 1 : 0;
+
+            const finalBuffer = new Uint8Array(jpegLen + padding + videoLength);
             finalBuffer.set(imageBytes.subarray(0, insertPos), 0);
             finalBuffer.set(app1Segment, insertPos);
             finalBuffer.set(imageBytes.subarray(insertPos), insertPos + app1Segment.length);
-            finalBuffer.set(new Uint8Array(videoArrayBuffer), insertPos + app1Segment.length + (imageBytes.length - insertPos));
+            if (padding) finalBuffer[jpegLen] = 0x00;
+            finalBuffer.set(new Uint8Array(videoArrayBuffer), jpegLen + padding);
 
             triggerDownload(new Blob([finalBuffer], { type: 'image/jpeg' }), `MotionPhoto_${Date.now()}.jpg`);
-            updateLog("✅ Live Photo Created Successfully!");
+            updateLog("✅ Motion Photo Created Successfully!");
         }
 
-        async function createIOSBundle(videoData, imageBytes) {
+        async function createIOSBundle(videoArrayBuffer, imageBytes) {
             const finalImageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
             const baseName = `IMG_${Math.floor(Math.random() * 9000) + 1000}`;
             
-            // Force .MOV extension for strict iOS parsing
             const jpgFile = new File([finalImageBlob], `${baseName}.JPG`, { type: "image/jpeg" });
-            const movFile = new File([videoData], `${baseName}.MOV`, { type: "video/quicktime" });
+            const movFile = new File([videoArrayBuffer], `${baseName}.MOV`, { type: "video/quicktime" }); // Must be .MOV
 
             if (navigator.canShare && navigator.canShare({ files: [jpgFile, movFile] })) {
-                try { 
-                    await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); 
-                    updateLog("✅ Live Photo Shared! Save to Photos.");
-                    return; 
-                } catch (err) { 
-                    if (err.name === 'AbortError' || (err.message && err.message.toLowerCase().includes('cancel'))) {
-                        updateLog("Share sheet cancelled."); return;
-                    }
-                    fallbackZipDownload(jpgFile, movFile); 
-                }
-            } else {
-                fallbackZipDownload(jpgFile, movFile);
-            }
+                try { await navigator.share({ title: 'Save Live Photo', files: [jpgFile, movFile] }); updateLog("✅ Live Photo Shared! Save to Photos."); return; } catch (err) { fallbackZipDownload(jpgFile, movFile); }
+            } else fallbackZipDownload(jpgFile, movFile);
         }
 
         async function fallbackZipDownload(jpg, mov) {
             updateLog("Bundling format safely...");
             try {
-                const zip = new JSZip(); 
-                zip.file(jpg.name, jpg); 
-                zip.file(mov.name, mov);
-                
-                // STORE compression prevents out-of-memory crashing on mobile
+                const zip = new JSZip(); zip.file(jpg.name, jpg); zip.file(mov.name, mov);
                 const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
-                triggerDownload(content, "LivePhoto_Bundle.zip");
-                updateLog("✅ Zip saved. Airdrop to iPhone or extract into Photos.");
+                triggerDownload(content, "LivePhoto_Bundle.zip"); updateLog("✅ Zip saved. Airdrop to iPhone or extract into Photos.");
             } catch (err) {
-                console.error("ZIP fallback failed", err);
-                
-                // Absolute fallback for iOS blocking double-downloads: Giant visual buttons
                 updateLog("Files ready! Please tap both to save:", "info");
-                const logEl = document.getElementById('logText');
-                logEl.innerHTML = "";
-                
-                const btn1 = document.createElement('button');
-                btn1.innerText = "1. Save Photo 💾";
-                btn1.style.cssText = "padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent-ios); color: white; font-weight: bold; cursor: pointer; margin: 4px;";
-                btn1.onclick = () => triggerDownload(jpg, jpg.name);
-                
-                const btn2 = document.createElement('button');
-                btn2.innerText = "2. Save Video 🎥";
-                btn2.style.cssText = btn1.style.cssText;
-                btn2.onclick = () => triggerDownload(mov, mov.name);
-                
-                logEl.appendChild(btn1);
-                logEl.appendChild(btn2);
+                const logEl = document.getElementById('logText'); logEl.innerHTML = "";
+                const b1 = document.createElement('button'); b1.innerText = "1. Save Photo 💾"; b1.style.cssText = "padding:10px 16px; border-radius:8px; border:none; background:var(--accent-ios); color:white; font-weight:bold; cursor:pointer; margin:4px;"; b1.onclick = () => triggerDownload(jpg, jpg.name);
+                const b2 = document.createElement('button'); b2.innerText = "2. Save Video 🎥"; b2.style.cssText = b1.style.cssText; b2.onclick = () => triggerDownload(mov, mov.name);
+                logEl.appendChild(b1); logEl.appendChild(b2);
             }
         }
 
         function triggerDownload(blob, filename) {
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = filename;
-            document.body.appendChild(a); a.click(); document.body.removeChild(a); 
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
     </script>
 </body>
